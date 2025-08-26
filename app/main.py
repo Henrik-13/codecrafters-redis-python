@@ -127,13 +127,23 @@ def handle_llen(connection, key):
     return connection.sendall(response.encode())
 
 
-def handle_lpop(connection, key):
-    if key in list_dict and list_dict[key]:
+def handle_lpop(connection, args):
+    key = args[0]
+    count = 1
+    if key not in list_dict:
+        return connection.sendall("$-1\r\n".encode())
+    if len(args) > 1:
+        count = int(args[1])
+
+    while count > 0:
+        if not list_dict[key]:
+            return connection.sendall("$-1\r\n".encode())
         value = list_dict[key].pop(0)
         response = f"${len(value)}\r\n{value}\r\n"
-        return connection.sendall(response.encode())
-    else:
-        return connection.sendall("$-1\r\n".encode())
+        count -= 1
+        connection.sendall(response.encode())
+    return None
+
 
 def send_response(connection):
     while True:
@@ -159,8 +169,8 @@ def send_response(connection):
             handle_lpush(connection, command[1], command[2:])
         elif command[0].upper() == "LLEN" and len(command) == 2:
             handle_llen(connection, command[1])
-        elif command[0].upper() == "LPOP" and len(command) == 2:
-            handle_lpop(connection, command[1])
+        elif command[0].upper() == "LPOP" and len(command) >= 2:
+            handle_lpop(connection, command[1:])
         else:
             connection.sendall(b"-ERR unknown command\r\n")
     connection.close()
