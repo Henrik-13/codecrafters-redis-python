@@ -1,5 +1,6 @@
 import socket  # noqa: F401
 import threading
+import time
 
 dictionary = {}
 list_dict = {}
@@ -152,6 +153,24 @@ def handle_lpop(connection, args):
     return connection.sendall(response.encode())
 
 
+def handle_blpop(connection, key, timeout):
+    timeout = int(timeout)
+    start_time = time.time() if timeout > 0 else None
+
+    while True:
+        if key in list_dict and list_dict[key]:
+            value = list_dict[key].pop(0)
+            response = f"*2\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n"
+            return connection.sendall(response.encode())
+
+        if timeout == 0:
+            threading.Event().wait(0.1)
+        else:
+            if start_time and (time.time() - start_time) >= timeout:
+                return connection.sendall(b"$-1\r\n")
+            threading.Event().wait(0.1)
+
+
 def send_response(connection):
     while True:
         data = connection.recv(1024)
@@ -178,6 +197,8 @@ def send_response(connection):
             handle_llen(connection, command[1])
         elif command[0].upper() == "LPOP" and len(command) >= 2:
             handle_lpop(connection, command[1:])
+        elif command[0].upper() == "BLPOP" and len(command) == 3:
+            handle_blpop(connection, command[1], command[2])
         else:
             connection.sendall(b"-ERR unknown command\r\n")
     connection.close()
