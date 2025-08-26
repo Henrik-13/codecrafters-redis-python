@@ -126,6 +126,15 @@ def handle_llen(connection, key):
     response = f":{length}\r\n"
     return connection.sendall(response.encode())
 
+
+def handle_lpop(connection, key):
+    if key in list_dict and list_dict[key]:
+        value = list_dict[key].pop(0)
+        response = f"${len(value)}\r\n{value}\r\n"
+        return connection.sendall(response.encode())
+    else:
+        return connection.sendall("$-1\r\n".encode())
+
 def send_response(connection):
     while True:
         data = connection.recv(1024)
@@ -150,6 +159,8 @@ def send_response(connection):
             handle_lpush(connection, command[1], command[2:])
         elif command[0].upper() == "LLEN" and len(command) == 2:
             handle_llen(connection, command[1])
+        elif command[0].upper() == "LPOP" and len(command) == 2:
+            handle_lpop()
         else:
             connection.sendall(b"-ERR unknown command\r\n")
     connection.close()
