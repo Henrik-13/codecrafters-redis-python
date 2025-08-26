@@ -154,7 +154,7 @@ def handle_lpop(connection, args):
 
 
 def handle_blpop(connection, key, timeout):
-    timeout = int(timeout)
+    timeout = float(timeout)
     start_time = time.time() if timeout > 0 else None
 
     while True:
