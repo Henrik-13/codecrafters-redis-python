@@ -9,6 +9,8 @@ list_dict = {}
 #     print("Encoding command:", command)
 #     parts = command.split()
 #     result = ""
+#     if len(parts) > 1:
+#         result += f"*{len(parts)}\r\n"
 #     for part in parts:
 #         result += f"${len(part)}\r\n{part}\r\n"
 #     return result
@@ -85,6 +87,24 @@ def handle_rpush(connection, key, values):
     response = f":{len(list_dict[key])}\r\n"
     return connection.sendall(response.encode())
 
+
+def handle_lrange(connection, key, start, end):
+    start = int(start)
+    end = int(end)
+    if key not in list_dict or start >= len(list_dict[key]) or start > end:
+        return connection.sendall("*0/r/n".encode())
+    lst = list_dict[key]
+    if end >= len(lst):
+        end = len(lst)
+    else:
+        end += 1
+    response = f"*{end - start}\r\n"
+    for value in lst[start:end]:
+        response += f"${len(value)}\r\n{value}\r\n"
+    
+    return connection.sendall(response.encode())
+
+
 def send_response(connection):
     while True:
         data = connection.recv(1024)
@@ -103,6 +123,8 @@ def send_response(connection):
             handle_get(connection, command[1])
         elif command[0].upper() == "RPUSH" and len(command) >= 3:
             handle_rpush(connection, command[1], command[2:])
+        elif command[0].upper() == "LRANGE":
+            handle_lrange(connection, command[1], command[2], command[3])
         else:
             connection.sendall(b"-ERR unknown command\r\n")
     connection.close()
