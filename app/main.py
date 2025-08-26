@@ -121,6 +121,11 @@ def handle_lpush(connection, key, values):
     return connection.sendall(response.encode())
 
 
+def handle_llen(connection, key):
+    length = len(list_dict.get(key, []))
+    response = f":{length}\r\n"
+    return connection.sendall(response.encode())
+
 def send_response(connection):
     while True:
         data = connection.recv(1024)
@@ -141,8 +146,10 @@ def send_response(connection):
             handle_rpush(connection, command[1], command[2:])
         elif command[0].upper() == "LRANGE" and len(command) == 4:
             handle_lrange(connection, command[1], command[2], command[3])
-        elif command[0].upper() == "LPUSH":
+        elif command[0].upper() == "LPUSH" and len(command) >= 3:
             handle_lpush(connection, command[1], command[2:])
+        elif command[0].upper() == "LLEN" and len(command) == 2:
+            handle_llen(connection, command[1])
         else:
             connection.sendall(b"-ERR unknown command\r\n")
     connection.close()
