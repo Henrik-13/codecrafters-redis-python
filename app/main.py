@@ -1,13 +1,64 @@
 import socket  # noqa: F401
 import threading
 
+# def redis_protocol_encode(command):
+#     print("Encoding command:", command)
+#     parts = command.split()
+#     result = ""
+#     for part in parts:
+#         result += f"${len(part)}\r\n{part}\r\n"
+#     return result
+
+
+def redis_protocol_decode(data):
+    lines = data.split("\r\n")
+    if not lines or lines[0] == "":
+        return None
+
+    if lines[0][0] != "*":
+        return None
+
+    try:
+        num_elements = int(lines[0][1:])
+    except ValueError:
+        return None
+
+    elements = []
+    index = 1
+    for _ in range(num_elements):
+        if index >= len(lines) or lines[index][0] != "$":
+            return None
+        try:
+            length = int(lines[index][1:])
+        except ValueError:
+            return None
+        index += 1
+        if index >= len(lines) or len(lines[index]) != length:
+            return None
+        elements.append(lines[index])
+        index += 1
+
+    return elements if len(elements) == num_elements else None
+
 
 def send_response(connection):
     while True:
         data = connection.recv(1024)
         if not data:
             break
-        connection.sendall(b"+PONG\r\n")
+
+        command = redis_protocol_decode(data.decode())
+        print(f"Received command: {command}")
+        if command[0].upper() == "PING":
+            connection.sendall(b"+PONG\r\n")
+        elif command[0].upper() == "ECHO" and len(command) == 2:
+            message = command[1]
+            response = f"${len(message)}\r\n{message}\r\n"
+            print("Sending response:", response)
+            connection.sendall(response.encode())
+        else:
+            connection.sendall(b"-ERR unknown command\r\n")
+    connection.close()
 
 
 def main():
