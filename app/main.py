@@ -77,10 +77,11 @@ def handle_get(connection, key):
         return connection.sendall(b"$-1\r\n")
 
 
-def handle_rpush(connection, key, value):
+def handle_rpush(connection, key, values):
     if key not in list_dict:
         list_dict[key] = []
-    list_dict[key].append(value)
+    for value in values:
+        list_dict[key].append(value)
     response = f":{len(list_dict[key])}\r\n"
     return connection.sendall(response.encode())
 
@@ -101,7 +102,7 @@ def send_response(connection):
         elif command[0].upper() == "GET" and len(command) == 2:
             handle_get(connection, command[1])
         elif command[0].upper() == "RPUSH" and len(command) >= 3:
-            handle_rpush(connection, command[1], command[2])
+            handle_rpush(connection, command[1], command[2:])
         else:
             connection.sendall(b"-ERR unknown command\r\n")
     connection.close()
