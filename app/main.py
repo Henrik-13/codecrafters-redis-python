@@ -92,7 +92,7 @@ def handle_lrange(connection, key, start, end):
     start = int(start)
     end = int(end)
     if key not in list_dict or start >= len(list_dict[key]) or start > end:
-        return connection.sendall("*0/r/n".encode())
+        return connection.sendall("*0\r\n".encode())
     lst = list_dict[key]
     if end >= len(lst):
         end = len(lst)
@@ -101,7 +101,7 @@ def handle_lrange(connection, key, start, end):
     response = f"*{end - start}\r\n"
     for value in lst[start:end]:
         response += f"${len(value)}\r\n{value}\r\n"
-    
+
     return connection.sendall(response.encode())
 
 
