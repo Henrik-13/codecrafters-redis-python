@@ -91,15 +91,22 @@ def handle_rpush(connection, key, values):
 def handle_lrange(connection, key, start, end):
     start = int(start)
     end = int(end)
-    if key not in list_dict or start >= len(list_dict[key]) or start > end:
+    if key not in list_dict or start >= len(list_dict[key]):
         return connection.sendall("*0\r\n".encode())
     lst = list_dict[key]
-    if end >= len(lst):
-        end = len(lst)
-    else:
-        end += 1
-    response = f"*{end - start}\r\n"
-    for value in lst[start:end]:
+
+    if start < 0:
+        start = len(lst) + start
+    if end < 0:
+        end = len(lst) + end
+
+    start = max(0, min(start, len(lst)))
+    end = max(-1, min(end, len(lst) - 1))
+
+    selected_items = lst[start:end + 1]
+    response = f"*{len(selected_items)}\r\n"
+
+    for value in selected_items:
         response += f"${len(value)}\r\n{value}\r\n"
 
     return connection.sendall(response.encode())
