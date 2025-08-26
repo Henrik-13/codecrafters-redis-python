@@ -160,7 +160,7 @@ def send_response(connection):
         elif command[0].upper() == "LLEN" and len(command) == 2:
             handle_llen(connection, command[1])
         elif command[0].upper() == "LPOP" and len(command) == 2:
-            handle_lpop()
+            handle_lpop(connection, command[1])
         else:
             connection.sendall(b"-ERR unknown command\r\n")
     connection.close()
