@@ -1,7 +1,7 @@
 import socket  # noqa: F401
 import threading
 
-dict = {}
+dictionary = {}
 
 # def redis_protocol_encode(command):
 #     print("Encoding command:", command)
@@ -54,12 +54,12 @@ def handle_echo(connection, message):
 
 
 def handle_set(connection, key, value):
-    dict[key] = value
+    dictionary[key] = value
     return connection.sendall(b"+OK\r\n")
 
 def handle_get(connection, key):
-    if key in dict:
-        value = dict[key]
+    if key in dictionary:
+        value = dictionary[key]
         response = f"${len(value)}\r\n{value}\r\n"
         return connection.sendall(response.encode())
     else:
