@@ -1,6 +1,8 @@
 import socket  # noqa: F401
 import threading
 
+dict = {}
+
 # def redis_protocol_encode(command):
 #     print("Encoding command:", command)
 #     parts = command.split()
@@ -41,6 +43,29 @@ def redis_protocol_decode(data):
     return elements if len(elements) == num_elements else None
 
 
+def handle_ping(connection):
+    return connection.sendall(b"+PONG\r\n")
+
+
+def handle_echo(connection, message):
+    response = f"${len(message)}\r\n{message}\r\n"
+    print("Sending response:", response)
+    return connection.sendall(response.encode())
+
+
+def handle_set(connection, key, value):
+    dict[key] = value
+    return connection.sendall(b"+OK\r\n")
+
+def handle_get(connection, key):
+    if key in dict:
+        value = dict[key]
+        response = f"${len(value)}\r\n{value}\r\n"
+        return connection.sendall(response.encode())
+    else:
+        return connection.sendall(b"$-1\r\n")
+
+
 def send_response(connection):
     while True:
         data = connection.recv(1024)
@@ -50,12 +75,13 @@ def send_response(connection):
         command = redis_protocol_decode(data.decode())
         print(f"Received command: {command}")
         if command[0].upper() == "PING":
-            connection.sendall(b"+PONG\r\n")
+            handle_ping(connection)
         elif command[0].upper() == "ECHO" and len(command) == 2:
-            message = command[1]
-            response = f"${len(message)}\r\n{message}\r\n"
-            print("Sending response:", response)
-            connection.sendall(response.encode())
+            handle_echo(connection, command[1])
+        elif command[0].upper() == "SET" and len(command) == 3:
+            handle_set(connection, command[1], command[2])
+        elif command[0].upper() == "GET" and len(command) == 2:
+            handle_get(connection, command[1])
         else:
             connection.sendall(b"-ERR unknown command\r\n")
     connection.close()
