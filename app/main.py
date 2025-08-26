@@ -130,18 +130,19 @@ def handle_llen(connection, key):
 def handle_lpop(connection, args):
     key = args[0]
     count = 1
-    if key not in list_dict:
+    if key not in list_dict or not list_dict[key]:
         return connection.sendall("$-1\r\n".encode())
     if len(args) > 1:
         count = int(args[1])
 
     deleted_items = []
-    while count > 0:
-        if not list_dict[key]:
-            return connection.sendall("$-1\r\n".encode())
+    while count > 0 and list_dict[key]:
         deleted_items.append(list_dict[key].pop(0))
         count -= 1
-    if len(deleted_items) == 1:
+
+    if not deleted_items:
+        response = "$-1\r\n"
+    elif len(deleted_items) == 1:
         response = f"${len(deleted_items[0])}\r\n{deleted_items[0]}\r\n"
     else:
         response = f"*{len(deleted_items)}\r\n"
