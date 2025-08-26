@@ -53,8 +53,16 @@ def handle_echo(connection, message):
     return connection.sendall(response.encode())
 
 
-def handle_set(connection, key, value):
+def handle_set(connection, args):
+    key = args[0]
+    value = args[1]
     dictionary[key] = value
+    if len(args) > 2 and args[2].upper() == "PX":
+        try:
+            expire_time = int(args[3]) / 1000.0
+            threading.Timer(expire_time, lambda: dictionary.pop(key, None)).start()
+        except (ValueError, IndexError):
+            return connection.sendall(b"-ERR invalid PX value\r\n")
     return connection.sendall(b"+OK\r\n")
 
 def handle_get(connection, key):
@@ -78,8 +86,8 @@ def send_response(connection):
             handle_ping(connection)
         elif command[0].upper() == "ECHO" and len(command) == 2:
             handle_echo(connection, command[1])
-        elif command[0].upper() == "SET" and len(command) == 3:
-            handle_set(connection, command[1], command[2])
+        elif command[0].upper() == "SET" and len(command) >= 3:
+            handle_set(connection, command[1:])
         elif command[0].upper() == "GET" and len(command) == 2:
             handle_get(connection, command[1])
         else:
