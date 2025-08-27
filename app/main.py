@@ -184,9 +184,45 @@ def handle_type(connection, key):
     return connection.sendall(response.encode())
 
 
+def parse_stream_id(id):
+    if id == "*":
+        return None
+    parts = id.split("-")
+    if len(parts) != 2:
+        return None
+    try:
+        timestamp = int(parts[0])
+        sequence = int(parts[1])
+        return timestamp, sequence
+    except ValueError:
+        return None
+
+
+def validate_stream_id(stream_key, id):
+    if stream_key not in streams or not streams[stream_key]:
+        return True
+    last_entry = streams[stream_key][-1]
+    last_id = last_entry["id"]
+    if id == "*":
+        return True
+    new_ts, new_seq = parse_stream_id(id)
+    last_ts, last_seq = parse_stream_id(last_id)
+    if new_ts is None or last_ts is None:
+        return False
+    if (new_ts > last_ts) or (new_ts == last_ts and new_seq < last_seq):
+        return False
+    return new_ts > last_ts or (new_ts == last_ts and new_seq > last_seq)
+
+
 def handle_xadd(connection, key, id, args):
     if len(args) % 2 != 0:
         return connection.sendall(b"-ERR wrong number of arguments for 'XADD' command\r\n")
+    ts, seq = parse_stream_id(id)
+    if id != "*" and (ts is None or seq is None or ts < 0 or seq < 0 or (ts == 0 and seq == 0)):
+        return connection.sendall(b"-ERR The ID specified in XADD must be greater than 0-0\r\n")
+    if not validate_stream_id(key, id):
+        return connection.sendall(
+            b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n")
     if key not in streams:
         streams[key] = []
     entry = {"id": id, "fields": {}}
