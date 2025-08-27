@@ -361,13 +361,6 @@ def handle_xread(connection, args, block=None):
 
 
 def handle_incr(connection, key):
-    # if key not in dictionary:
-    #     dictionary[key] = 1
-    # elif type(dictionary[key]) == int:
-    #     dictionary[key] = int(dictionary[key]) + 1
-    # else:
-    #     return connection.sendall(b"-ERR value is not an integer or out of range\r\n")
-
     if key not in dictionary:
         dictionary[key] = "1"
     else:
@@ -380,6 +373,8 @@ def handle_incr(connection, key):
     return connection.sendall(f":{dictionary[key]}\r\n".encode())
 
 
+def handle_multi(connection):
+    return connection.sendall(b"+OK\r\n")
 
 def send_response(connection):
     while True:
@@ -427,6 +422,8 @@ def send_response(connection):
                 handle_xread(connection, command[2:], )
         elif cmd == "INCR" and len(command) == 2:
             handle_incr(connection, command[1])
+        elif cmd == "MULTI" and len(command) == 1:
+            handle_multi(connection)
         else:
             connection.sendall(b"-ERR unknown command\r\n")
     connection.close()
