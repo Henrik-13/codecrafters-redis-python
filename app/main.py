@@ -275,6 +275,9 @@ def handle_xrange(connection, key, start, end):
     if key not in streams or not streams[key]:
         return connection.sendall(b"*0\r\n")
 
+    if start == "-":
+        start = streams[key][0]["id"]
+
     filtered_entries = []
     for entry in streams[key]:
         entry_id = entry["id"]
