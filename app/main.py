@@ -362,11 +362,12 @@ def handle_xread(connection, args, block=None):
 
 
 def handle_incr(connection, key):
-    # if key not in dictionary:
-    #     dictionary[key] = 1
-    # else:
-    dictionary[key] = int(dictionary[key])
-    dictionary[key] += 1
+    if key not in dictionary:
+        dictionary[key] = "1"
+    else:
+        value = int(dictionary[key])
+        value += 1
+        dictionary[key] = str(value)
     return connection.sendall(f":{dictionary[key]}\r\n".encode())
 
 
