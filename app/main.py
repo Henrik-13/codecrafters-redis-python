@@ -242,12 +242,12 @@ def handle_xadd(connection, key, id, args):
                     seq = 1
                 else:
                     seq = last_seq + 1 if ts == last_ts else 0
-
-        if ts is None or seq is None or ts < 0 or seq < 0 or (ts == 0 and seq == 0):
-            return connection.sendall(b"-ERR The ID specified in XADD must be greater than 0-0\r\n")
-        if not validate_stream_id(key, id):
-                return connection.sendall(
-                    b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n")
+        else:
+            if ts is None or seq is None or ts < 0 or seq < 0 or (ts == 0 and seq == 0):
+                return connection.sendall(b"-ERR The ID specified in XADD must be greater than 0-0\r\n")
+            if not validate_stream_id(key, id):
+                    return connection.sendall(
+                        b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n")
     if key not in streams:
         streams[key] = []
     entry = {"id": id, "fields": {}}
