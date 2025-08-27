@@ -185,17 +185,19 @@ def handle_type(connection, key):
 
 
 def parse_stream_id(id):
-    if id == "*":
-        return None
+    # if id == "*":
+    #     return None
     parts = id.split("-")
     if len(parts) != 2:
-        return None
+        return None, None
     try:
         timestamp = int(parts[0])
-        sequence = int(parts[1])
+        sequence = parts[1]
+        if sequence != "*":
+            sequence = int(sequence)
         return timestamp, sequence
     except ValueError:
-        return None
+        return None, None
 
 
 def validate_stream_id(stream_key, id):
@@ -203,8 +205,8 @@ def validate_stream_id(stream_key, id):
         return True
     last_entry = streams[stream_key][-1]
     last_id = last_entry["id"]
-    if id == "*":
-        return True
+    # if id == "*":
+    #     return True
     new_ts, new_seq = parse_stream_id(id)
     last_ts, last_seq = parse_stream_id(last_id)
     if new_ts is None or last_ts is None:
@@ -214,15 +216,38 @@ def validate_stream_id(stream_key, id):
     return new_ts > last_ts or (new_ts == last_ts and new_seq > last_seq)
 
 
+def generate_stream_id():
+    current_time = int(time.time() * 1000)
+    return f"{current_time}-0"
+
+
 def handle_xadd(connection, key, id, args):
     if len(args) % 2 != 0:
         return connection.sendall(b"-ERR wrong number of arguments for 'XADD' command\r\n")
-    ts, seq = parse_stream_id(id)
-    if id != "*" and (ts is None or seq is None or ts < 0 or seq < 0 or (ts == 0 and seq == 0)):
-        return connection.sendall(b"-ERR The ID specified in XADD must be greater than 0-0\r\n")
-    if not validate_stream_id(key, id):
-        return connection.sendall(
-            b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n")
+    if id == "*":
+        id = generate_stream_id()
+    else:
+        ts, seq = parse_stream_id(id)
+        if ts and seq == "*":
+            if key in streams and streams[key]:
+                last_entry = streams[key][-1]
+                last_id = last_entry["id"]
+                last_ts, last_seq = parse_stream_id(last_id)
+                # if last_ts is None or last_seq is None:
+                #     return connection.sendall(b"-ERR The ID specified in XADD is invalid\r\n")
+                # if ts < last_ts:
+                #     return connection.sendall(
+                #         b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n")
+                if ts == 0 and not last_ts:
+                    seq = 1
+                else:
+                    seq = last_seq + 1 if ts == last_ts else 0
+
+        if ts is None or seq is None or ts < 0 or seq < 0 or (ts == 0 and seq == 0):
+            return connection.sendall(b"-ERR The ID specified in XADD must be greater than 0-0\r\n")
+        if not validate_stream_id(key, id):
+                return connection.sendall(
+                    b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n")
     if key not in streams:
         streams[key] = []
     entry = {"id": id, "fields": {}}
