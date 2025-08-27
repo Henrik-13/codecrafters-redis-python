@@ -301,31 +301,49 @@ def handle_xrange(connection, key, start, end):
     return connection.sendall(response.encode())
 
 
-def handle_xread(connection, args):
+def handle_xread(connection, args, block=None):
     if len(args) < 2 or len(args) % 2 != 0:
         return connection.sendall(b"-ERR wrong number of arguments for 'XREAD' command\r\n")
-    response = f"*{int(len(args) / 2)}\r\n"
-    for i in range(0, int(len(args) / 2)):
-        key = args[i]
-        id = args[i + int(len(args) / 2)]
-        if key not in streams or not streams[key]:
+    num_streams = len(args) // 2
+    start_time = time.time() if block is not None else None
+
+    while True:
+        has_results = False
+        response = f"*{num_streams}\r\n"
+
+        for i in range(num_streams):
+            key = args[i]
+            id = args[i + num_streams]
+            if key not in streams or not streams[key]:
+                if not block:
+                    return connection.sendall(b"*0\r\n")
+                continue
+
+            filtered_entries = []
+            for entry in streams[key]:
+                entry_id = entry["id"]
+                if compare_stream_ids(entry_id, id) > 0:
+                    filtered_entries.append(entry)
+
+            if filtered_entries:
+                has_results = True
+                response += f"*2\r\n${len(key)}\r\n{key}\r\n*{len(filtered_entries)}\r\n"
+                for entry in filtered_entries:
+                    response += f"*2\r\n${len(entry['id'])}\r\n{entry['id']}\r\n"
+                    fields = entry["fields"]
+                    response += f"*{len(fields) * 2}\r\n"
+                    for field, value in fields.items():
+                        response += f"${len(field)}\r\n{field}\r\n${len(value)}\r\n{value}\r\n"
+        if has_results:
+            return connection.sendall(response.encode())
+
+        if block is None:
             return connection.sendall(b"*0\r\n")
 
-        filtered_entries = []
-        for entry in streams[key]:
-            entry_id = entry["id"]
-            if compare_stream_ids(entry_id, id) > 0:
-                filtered_entries.append(entry)
+        if block > 0 and start_time and (time.time() - start_time) >= block:
+            return connection.sendall(b"$-1\r\n")
 
-        response += f"*2\r\n${len(key)}\r\n{key}\r\n*{len(filtered_entries)}\r\n"
-        for entry in filtered_entries:
-            response += f"*2\r\n${len(entry['id'])}\r\n{entry['id']}\r\n"
-            fields = entry["fields"]
-            response += f"*{len(fields) * 2}\r\n"
-            for field, value in fields.items():
-                response += f"${len(field)}\r\n{field}\r\n${len(value)}\r\n{value}\r\n"
-
-    return connection.sendall(response.encode())
+        threading.Event().wait(0.1)
 
 
 def send_response(connection):
@@ -336,34 +354,42 @@ def send_response(connection):
 
         command = redis_protocol_decode(data.decode())
         print(f"Received command: {command}")
-        if command[0].upper() == "PING":
+        cmd = command[0].upper() if command else None
+        if cmd == "PING":
             handle_ping(connection)
-        elif command[0].upper() == "ECHO" and len(command) == 2:
+        elif cmd == "ECHO" and len(command) == 2:
             handle_echo(connection, command[1])
-        elif command[0].upper() == "SET" and len(command) >= 3:
+        elif cmd == "SET" and len(command) >= 3:
             handle_set(connection, command[1:])
-        elif command[0].upper() == "GET" and len(command) == 2:
+        elif cmd == "GET" and len(command) == 2:
             handle_get(connection, command[1])
-        elif command[0].upper() == "RPUSH" and len(command) >= 3:
+        elif cmd == "RPUSH" and len(command) >= 3:
             handle_rpush(connection, command[1], command[2:])
-        elif command[0].upper() == "LRANGE" and len(command) == 4:
+        elif cmd == "LRANGE" and len(command) == 4:
             handle_lrange(connection, command[1], command[2], command[3])
-        elif command[0].upper() == "LPUSH" and len(command) >= 3:
+        elif cmd == "LPUSH" and len(command) >= 3:
             handle_lpush(connection, command[1], command[2:])
-        elif command[0].upper() == "LLEN" and len(command) == 2:
+        elif cmd == "LLEN" and len(command) == 2:
             handle_llen(connection, command[1])
-        elif command[0].upper() == "LPOP" and len(command) >= 2:
+        elif cmd == "LPOP" and len(command) >= 2:
             handle_lpop(connection, command[1:])
-        elif command[0].upper() == "BLPOP" and len(command) == 3:
+        elif cmd == "BLPOP" and len(command) == 3:
             handle_blpop(connection, command[1], command[2])
-        elif command[0].upper() == "TYPE" and len(command) == 2:
+        elif cmd == "TYPE" and len(command) == 2:
             handle_type(connection, command[1])
-        elif command[0].upper() == "XADD" and len(command) >= 4:
+        elif cmd == "XADD" and len(command) >= 4:
             handle_xadd(connection, command[1], command[2], command[3:])
-        elif command[0].upper() == "XRANGE" and len(command) == 4:
+        elif cmd == "XRANGE" and len(command) == 4:
             handle_xrange(connection, command[1], command[2], command[3])
-        elif command[0].upper() == "XREAD" and len(command) >= 4:
-            handle_xread(connection, command[2:])
+        elif cmd == "XREAD" and len(command) >= 4:
+            if command[1].upper() == "BLOCK":
+                try:
+                    block_time = int(command[2]) / 1000.0
+                    handle_xread(connection, command[4:], block=block_time)
+                except ValueError:
+                    connection.sendall(b"-ERR invalid BLOCK value\r\n")
+            else:
+                handle_xread(connection, command[2:], )
         else:
             connection.sendall(b"-ERR unknown command\r\n")
     connection.close()
