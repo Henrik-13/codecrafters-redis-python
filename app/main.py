@@ -225,7 +225,6 @@ def generate_next_stream_id(key, ts):
         seq = last_seq + 1 if ts == last_ts else 0
     else:
         seq = 1 if ts == 0 else 0
-    # id = f"{ts}-{seq}"
     return f"{ts}-{seq}"
 
 
@@ -362,12 +361,22 @@ def handle_xread(connection, args, block=None):
 
 
 def handle_incr(connection, key):
+    # if key not in dictionary:
+    #     dictionary[key] = 1
+    # elif type(dictionary[key]) == int:
+    #     dictionary[key] = int(dictionary[key]) + 1
+    # else:
+    #     return connection.sendall(b"-ERR value is not an integer or out of range\r\n")
+
     if key not in dictionary:
         dictionary[key] = "1"
     else:
-        value = int(dictionary[key])
-        value += 1
-        dictionary[key] = str(value)
+        try:
+            dictionary[key] = int(dictionary[key]) + 1
+        except ValueError:
+            return connection.sendall(b"-ERR value is not an integer or out of range\r\n")
+
+    dictionary[key] = str(dictionary[key])
     return connection.sendall(f":{dictionary[key]}\r\n".encode())
 
 
