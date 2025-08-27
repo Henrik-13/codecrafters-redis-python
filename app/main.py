@@ -171,6 +171,16 @@ def handle_blpop(connection, key, timeout):
             threading.Event().wait(0.1)
 
 
+def handle_type(connection, key):
+    if key in dictionary:
+        response = "+string\r\n"
+    elif key in list_dict:
+        response = "+list\r\n"
+    else:
+        response = "+none\r\n"
+    return connection.sendall(response.encode())
+
+
 def send_response(connection):
     while True:
         data = connection.recv(1024)
@@ -199,6 +209,8 @@ def send_response(connection):
             handle_lpop(connection, command[1:])
         elif command[0].upper() == "BLPOP" and len(command) == 3:
             handle_blpop(connection, command[1], command[2])
+        elif command[0].upper() == "TYPE" and len(command) == 2:
+            handle_type(connection, command[1])
         else:
             connection.sendall(b"-ERR unknown command\r\n")
     connection.close()
