@@ -361,6 +361,16 @@ def handle_xread(connection, args, block=None):
         threading.Event().wait(0.1)
 
 
+def handle_incr(connection, key):
+    # if key not in dictionary:
+    #     dictionary[key] = 1
+    # else:
+    dictionary[key] = int(dictionary[key])
+    dictionary[key] += 1
+    return connection.sendall(f":{dictionary[key]}\r\n".encode())
+
+
+
 def send_response(connection):
     while True:
         data = connection.recv(1024)
@@ -405,6 +415,8 @@ def send_response(connection):
                     connection.sendall(b"-ERR invalid BLOCK value\r\n")
             else:
                 handle_xread(connection, command[2:], )
+        elif cmd == "INCR" and len(command) == 2:
+            handle_incr(connection, command[1])
         else:
             connection.sendall(b"-ERR unknown command\r\n")
     connection.close()
