@@ -278,6 +278,9 @@ def handle_xrange(connection, key, start, end):
     if start == "-":
         start = streams[key][0]["id"]
 
+    if end == "+":
+        end = streams[key][-1]["id"]
+
     filtered_entries = []
     for entry in streams[key]:
         entry_id = entry["id"]
