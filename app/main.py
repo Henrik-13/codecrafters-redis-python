@@ -228,7 +228,7 @@ def handle_xadd(connection, key, id, args):
         id = generate_stream_id()
     else:
         ts, seq = parse_stream_id(id)
-        if ts and seq == "*":
+        if ts is not None and seq == "*":
             if key in streams and streams[key]:
                 last_entry = streams[key][-1]
                 last_id = last_entry["id"]
