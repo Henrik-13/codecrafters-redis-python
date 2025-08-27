@@ -301,26 +301,29 @@ def handle_xrange(connection, key, start, end):
     return connection.sendall(response.encode())
 
 
-def handle_xread(connection, key, id):
-    if key not in streams or not streams[key]:
-        return connection.sendall(b"*0\r\n")
+def handle_xread(connection, args):
+    if len(args) < 2 or len(args) % 2 != 0:
+        return connection.sendall(b"-ERR wrong number of arguments for 'XREAD' command\r\n")
+    response = f"*{int(len(args) / 2)}\r\n"
+    for i in range(0, int(len(args) / 2)):
+        key = args[i]
+        id = args[i + int(len(args) / 2)]
+        if key not in streams or not streams[key]:
+            return connection.sendall(b"*0\r\n")
 
-    filtered_entries = []
-    for entry in streams[key]:
-        entry_id = entry["id"]
-        if compare_stream_ids(entry_id, id) > 0:
-            filtered_entries.append(entry)
+        filtered_entries = []
+        for entry in streams[key]:
+            entry_id = entry["id"]
+            if compare_stream_ids(entry_id, id) > 0:
+                filtered_entries.append(entry)
 
-    if not filtered_entries:
-        return connection.sendall(b"*0\r\n")
-
-    response = f"*1\r\n*2\r\n${len(key)}\r\n{key}\r\n*{len(filtered_entries)}\r\n"
-    for entry in filtered_entries:
-        response += f"*2\r\n${len(entry['id'])}\r\n{entry['id']}\r\n"
-        fields = entry["fields"]
-        response += f"*{len(fields) * 2}\r\n"
-        for field, value in fields.items():
-            response += f"${len(field)}\r\n{field}\r\n${len(value)}\r\n{value}\r\n"
+        response += f"*2\r\n${len(key)}\r\n{key}\r\n*{len(filtered_entries)}\r\n"
+        for entry in filtered_entries:
+            response += f"*2\r\n${len(entry['id'])}\r\n{entry['id']}\r\n"
+            fields = entry["fields"]
+            response += f"*{len(fields) * 2}\r\n"
+            for field, value in fields.items():
+                response += f"${len(field)}\r\n{field}\r\n${len(value)}\r\n{value}\r\n"
 
     return connection.sendall(response.encode())
 
@@ -359,8 +362,8 @@ def send_response(connection):
             handle_xadd(connection, command[1], command[2], command[3:])
         elif command[0].upper() == "XRANGE" and len(command) == 4:
             handle_xrange(connection, command[1], command[2], command[3])
-        elif command[0].upper() == "XREAD" and len(command) == 4:
-            handle_xread(connection, command[2], command[3])
+        elif command[0].upper() == "XREAD" and len(command) >= 4:
+            handle_xread(connection, command[2:])
         else:
             connection.sendall(b"-ERR unknown command\r\n")
     connection.close()
