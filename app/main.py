@@ -4,6 +4,7 @@ import time
 
 dictionary = {}
 list_dict = {}
+streams = {}
 
 
 # def redis_protocol_encode(command):
@@ -176,8 +177,24 @@ def handle_type(connection, key):
         response = "+string\r\n"
     elif key in list_dict:
         response = "+list\r\n"
+    elif key in streams:
+        response = "+stream\r\n"
     else:
         response = "+none\r\n"
+    return connection.sendall(response.encode())
+
+
+def handle_xadd(connection, key, id, args):
+    if len(args) % 2 != 0:
+        return connection.sendall(b"-ERR wrong number of arguments for 'XADD' command\r\n")
+    if key not in streams:
+        streams[key] = []
+    entry = {"id": id, "fields": {}}
+    for i in range(0, len(args), 2):
+        if i + 1 < len(args):
+            entry["fields"][args[i]] = args[i + 1]
+    streams[key].append(entry)
+    response = f"${len(id)}\r\n{id}\r\n"
     return connection.sendall(response.encode())
 
 
@@ -211,6 +228,8 @@ def send_response(connection):
             handle_blpop(connection, command[1], command[2])
         elif command[0].upper() == "TYPE" and len(command) == 2:
             handle_type(connection, command[1])
+        elif command[0].upper() == "XADD":
+            handle_xadd(connection, command[1], command[2], command[3:])
         else:
             connection.sendall(b"-ERR unknown command\r\n")
     connection.close()
