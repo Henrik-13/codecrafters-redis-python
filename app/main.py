@@ -238,11 +238,15 @@ def handle_xadd(connection, key, id, args):
                 # if ts < last_ts:
                 #     return connection.sendall(
                 #         b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n")
-                if ts == 0 and last_ts is None:
-                    seq = 1
-                else:
-                    seq = last_seq + 1 if ts == last_ts else 0
-                id = f"{ts}-{seq}"
+                print(f"Last ID: {last_id}, Last TS: {last_ts}, Last SEQ: {last_seq}")
+                # if ts == 0 and last_ts is None:
+                #     seq = 1
+                # else:
+                seq = last_seq + 1 if ts == last_ts else 0
+            else:
+                seq = 1 if ts == 0 else 0
+            id = f"{ts}-{seq}"
+            print(f"Generated ID with *: {id}")
         else:
             if ts is None or seq is None or ts < 0 or seq < 0 or (ts == 0 and seq == 0):
                 return connection.sendall(b"-ERR The ID specified in XADD must be greater than 0-0\r\n")
