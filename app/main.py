@@ -307,16 +307,27 @@ def handle_xread(connection, args, block=None):
     num_streams = len(args) // 2
     start_time = time.time() if block is not None else None
 
+    processed_ids = []
+    for i in range(num_streams):
+        key = args[i]
+        id = args[i + num_streams]
+
+        if id == "$":
+            if key in streams and streams[key]:
+                last_entry = streams[key][-1]
+                id = last_entry["id"]
+            else:
+                id = "0-0"
+        processed_ids.append(id)
+
     while True:
         has_results = False
-        response = f"*{num_streams}\r\n"
+        results = []
 
         for i in range(num_streams):
             key = args[i]
-            id = args[i + num_streams]
+            id = processed_ids[i]
             if key not in streams or not streams[key]:
-                if not block:
-                    return connection.sendall(b"*0\r\n")
                 continue
 
             filtered_entries = []
@@ -327,20 +338,24 @@ def handle_xread(connection, args, block=None):
 
             if filtered_entries:
                 has_results = True
-                response += f"*2\r\n${len(key)}\r\n{key}\r\n*{len(filtered_entries)}\r\n"
-                for entry in filtered_entries:
+                results.append((key, filtered_entries))
+
+        if has_results:
+            response = f"*{len(results)}\r\n"
+            for key, entries in results:
+                response += f"*2\r\n${len(key)}\r\n{key}\r\n*{len(entries)}\r\n"
+                for entry in entries:
                     response += f"*2\r\n${len(entry['id'])}\r\n{entry['id']}\r\n"
                     fields = entry["fields"]
                     response += f"*{len(fields) * 2}\r\n"
                     for field, value in fields.items():
                         response += f"${len(field)}\r\n{field}\r\n${len(value)}\r\n{value}\r\n"
-        if has_results:
             return connection.sendall(response.encode())
 
         if block is None:
             return connection.sendall(b"*0\r\n")
 
-        if block > 0 and start_time and (time.time() - start_time) >= block:
+        if 0 < block <= (time.time() - start_time) and start_time:
             return connection.sendall(b"$-1\r\n")
 
         threading.Event().wait(0.1)
