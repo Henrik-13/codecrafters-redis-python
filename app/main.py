@@ -185,8 +185,6 @@ def handle_type(connection, key):
 
 
 def parse_stream_id(id):
-    # if id == "*":
-    #     return None
     parts = id.split("-")
     if len(parts) != 2:
         return None, None
@@ -205,8 +203,6 @@ def validate_stream_id(stream_key, id):
         return True
     last_entry = streams[stream_key][-1]
     last_id = last_entry["id"]
-    # if id == "*":
-    #     return True
     new_ts, new_seq = parse_stream_id(id)
     last_ts, last_seq = parse_stream_id(last_id)
     if new_ts is None or last_ts is None:
@@ -221,6 +217,18 @@ def generate_stream_id():
     return f"{current_time}-0"
 
 
+def generate_next_stream_id(key, ts):
+    if key in streams and streams[key]:
+        last_entry = streams[key][-1]
+        last_id = last_entry["id"]
+        last_ts, last_seq = parse_stream_id(last_id)
+        seq = last_seq + 1 if ts == last_ts else 0
+    else:
+        seq = 1 if ts == 0 else 0
+    # id = f"{ts}-{seq}"
+    return f"{ts}-{seq}"
+
+
 def handle_xadd(connection, key, id, args):
     if len(args) % 2 != 0:
         return connection.sendall(b"-ERR wrong number of arguments for 'XADD' command\r\n")
@@ -229,30 +237,13 @@ def handle_xadd(connection, key, id, args):
     else:
         ts, seq = parse_stream_id(id)
         if ts is not None and seq == "*":
-            if key in streams and streams[key]:
-                last_entry = streams[key][-1]
-                last_id = last_entry["id"]
-                last_ts, last_seq = parse_stream_id(last_id)
-                # if last_ts is None or last_seq is None:
-                #     return connection.sendall(b"-ERR The ID specified in XADD is invalid\r\n")
-                # if ts < last_ts:
-                #     return connection.sendall(
-                #         b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n")
-                print(f"Last ID: {last_id}, Last TS: {last_ts}, Last SEQ: {last_seq}")
-                # if ts == 0 and last_ts is None:
-                #     seq = 1
-                # else:
-                seq = last_seq + 1 if ts == last_ts else 0
-            else:
-                seq = 1 if ts == 0 else 0
-            id = f"{ts}-{seq}"
-            print(f"Generated ID with *: {id}")
+            id = generate_next_stream_id(key, ts)
         else:
             if ts is None or seq is None or ts < 0 or seq < 0 or (ts == 0 and seq == 0):
                 return connection.sendall(b"-ERR The ID specified in XADD must be greater than 0-0\r\n")
             if not validate_stream_id(key, id):
-                    return connection.sendall(
-                        b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n")
+                return connection.sendall(
+                    b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n")
     if key not in streams:
         streams[key] = []
     entry = {"id": id, "fields": {}}
@@ -261,6 +252,43 @@ def handle_xadd(connection, key, id, args):
             entry["fields"][args[i]] = args[i + 1]
     streams[key].append(entry)
     response = f"${len(id)}\r\n{id}\r\n"
+    return connection.sendall(response.encode())
+
+
+def compare_stream_ids(id1, id2):
+    ts1, seq1 = parse_stream_id(id1)
+    ts2, seq2 = parse_stream_id(id2)
+    if ts1 < ts2:
+        return -1
+    elif ts1 > ts2:
+        return 1
+    else:
+        if seq1 < seq2:
+            return -1
+        elif seq1 > seq2:
+            return 1
+        else:
+            return 0
+
+
+def handle_xrange(connection, key, start, end):
+    if key not in streams or not streams[key]:
+        return connection.sendall(b"*0\r\n")
+
+    filtered_entries = []
+    for entry in streams[key]:
+        entry_id = entry["id"]
+        if compare_stream_ids(start, entry_id) <= 0 and compare_stream_ids(entry_id, end) <= 0:
+            filtered_entries.append(entry)
+
+    response = f"*{len(filtered_entries)}\r\n"
+    for entry in filtered_entries:
+        response += f"*2\r\n${len(entry['id'])}\r\n{entry['id']}\r\n"
+        fields = entry["fields"]
+        response += f"*{len(fields) * 2}\r\n"
+        for field, value in fields.items():
+            response += f"${len(field)}\r\n{field}\r\n${len(value)}\r\n{value}\r\n"
+
     return connection.sendall(response.encode())
 
 
@@ -296,6 +324,8 @@ def send_response(connection):
             handle_type(connection, command[1])
         elif command[0].upper() == "XADD":
             handle_xadd(connection, command[1], command[2], command[3:])
+        elif command[0].upper() == "XRANGE" and len(command) == 4:
+            handle_xrange(connection, command[1], command[2], command[3])
         else:
             connection.sendall(b"-ERR unknown command\r\n")
     connection.close()
