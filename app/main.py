@@ -1,6 +1,9 @@
 import socket  # noqa: F401
 import threading
 import time
+import argparse
+
+parser = argparse.ArgumentParser()
 
 dictionary = {}
 list_dict = {}
@@ -386,9 +389,6 @@ def handle_exec(connection):
         return connection.sendall(b"-ERR EXEC without MULTI\r\n")
 
     commands = connection_states[conn_id]['commands']
-    if len(commands) == 0:
-        del connection_states[conn_id]
-        return connection.sendall(b"*0\r\n")
     connection.sendall(f"*{len(commands)}\r\n".encode())
     for command in commands:
         execute_command(connection, command)
@@ -488,13 +488,13 @@ def send_response(connection):
         connection.close()
 
 
-def main():
+def main(args):
     # You can use print statements as follows for debugging, they'll be visible when running tests.
     print("Logs from your program will appear here!")
 
     # Uncomment this to pass the first stage
     #
-    server_socket = socket.create_server(("localhost", 6379), reuse_port=True)
+    server_socket = socket.create_server(("localhost", int(args.port)), reuse_port=True)
     while True:
         connection, _ = server_socket.accept()  # wait for client
         thread = threading.Thread(target=send_response, args=(connection,))
@@ -502,4 +502,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser.add_argument("--port", type=int, default=6379, help="Port to listen on")
+    args = parser.parse_args()
+    main(args)
