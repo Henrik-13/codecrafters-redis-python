@@ -376,7 +376,7 @@ def handle_incr(connection, key):
 
 def handle_multi(connection):
     conn_id = id(connection)
-    connection_states[conn_id] = {'in_transaction': True}
+    connection_states[conn_id] = {'in_transaction': True, 'commands': []}
     return connection.sendall(b"+OK\r\n")
 
 
@@ -386,8 +386,16 @@ def handle_exec(connection):
         return connection.sendall(b"-ERR EXEC without MULTI\r\n")
 
     del connection_states[conn_id]
-
     return connection.sendall(b"*0\r\n")
+
+
+def queue_command(connection, command):
+    conn_id = id(connection)
+    if conn_id in connection_states and connection_states[conn_id].get('in_transaction'):
+        connection_states[conn_id]['commands'].append(command)
+        connection.sendall(b"+QUEUED\r\n")
+        return True
+    return False
 
 
 def send_response(connection):
@@ -400,6 +408,17 @@ def send_response(connection):
             command = redis_protocol_decode(data.decode())
             print(f"Received command: {command}")
             cmd = command[0].upper() if command else None
+
+            if cmd == "MULTI" and len(command) == 1:
+                handle_multi(connection)
+                continue
+            elif cmd == "EXEC" and len(command) == 1:
+                handle_exec(connection)
+                continue
+
+            if queue_command(connection, command):
+                continue
+
             if cmd == "PING":
                 handle_ping(connection)
             elif cmd == "ECHO" and len(command) == 2:
@@ -437,10 +456,6 @@ def send_response(connection):
                     handle_xread(connection, command[2:], )
             elif cmd == "INCR" and len(command) == 2:
                 handle_incr(connection, command[1])
-            elif cmd == "MULTI" and len(command) == 1:
-                handle_multi(connection)
-            elif cmd == "EXEC" and len(command) == 1:
-                handle_exec(connection)
             else:
                 connection.sendall(b"-ERR unknown command\r\n")
     finally:
