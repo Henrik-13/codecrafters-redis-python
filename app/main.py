@@ -413,6 +413,13 @@ def handle_discard(connection):
     return connection.sendall(b"+OK\r\n")
 
 
+def handle_info(connection, section=None):
+    if section and section.upper() != "REPLICATION":
+        return connection.sendall(b"$11\r\nrole:master\r\n")
+    else:
+        return connection.sendall(b"-ERR unsupported INFO section\r\n")
+
+
 def execute_command(connection, command):
     cmd = command[0].upper() if command else None
 
@@ -453,6 +460,8 @@ def execute_command(connection, command):
             handle_xread(connection, command[2:], )
     elif cmd == "INCR" and len(command) == 2:
         handle_incr(connection, command[1])
+    elif cmd == "INFO":
+        handle_info(connection, command[1])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
