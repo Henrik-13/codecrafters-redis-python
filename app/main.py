@@ -414,10 +414,10 @@ def handle_discard(connection):
 
 
 def handle_info(connection, section=None):
-    if section and section.upper() != "REPLICATION":
-        return connection.sendall(b"$11\r\nrole:master\r\n")
-    else:
-        return connection.sendall(b"-ERR unsupported INFO section\r\n")
+    # if section and section.upper() != "REPLICATION":
+    return connection.sendall(b"$11\r\nrole:master\r\n")
+    # else:
+    #     return connection.sendall(b"-ERR unsupported INFO section\r\n")
 
 
 def execute_command(connection, command):
