@@ -5,6 +5,7 @@ import time
 dictionary = {}
 list_dict = {}
 streams = {}
+connection_states = {}
 
 
 # def redis_protocol_encode(command):
@@ -374,66 +375,79 @@ def handle_incr(connection, key):
 
 
 def handle_multi(connection):
+    conn_id = id(connection)
+    connection_states[conn_id] = {'in_transaction': True}
     return connection.sendall(b"+OK\r\n")
 
 
 def handle_exec(connection):
-    return connection.sendall(b"-ERR EXEC without MULTI\r\n")
+    conn_id = id(connection)
+    if conn_id not in connection_states or not connection_states[conn_id].get('in_transaction'):
+        return connection.sendall(b"-ERR EXEC without MULTI\r\n")
+
+    del connection_states[conn_id]
+
+    return connection.sendall(b"*0\r\n")
 
 
 def send_response(connection):
-    while True:
-        data = connection.recv(1024)
-        if not data:
-            break
+    try:
+        while True:
+            data = connection.recv(1024)
+            if not data:
+                break
 
-        command = redis_protocol_decode(data.decode())
-        print(f"Received command: {command}")
-        cmd = command[0].upper() if command else None
-        if cmd == "PING":
-            handle_ping(connection)
-        elif cmd == "ECHO" and len(command) == 2:
-            handle_echo(connection, command[1])
-        elif cmd == "SET" and len(command) >= 3:
-            handle_set(connection, command[1:])
-        elif cmd == "GET" and len(command) == 2:
-            handle_get(connection, command[1])
-        elif cmd == "RPUSH" and len(command) >= 3:
-            handle_rpush(connection, command[1], command[2:])
-        elif cmd == "LRANGE" and len(command) == 4:
-            handle_lrange(connection, command[1], command[2], command[3])
-        elif cmd == "LPUSH" and len(command) >= 3:
-            handle_lpush(connection, command[1], command[2:])
-        elif cmd == "LLEN" and len(command) == 2:
-            handle_llen(connection, command[1])
-        elif cmd == "LPOP" and len(command) >= 2:
-            handle_lpop(connection, command[1:])
-        elif cmd == "BLPOP" and len(command) == 3:
-            handle_blpop(connection, command[1], command[2])
-        elif cmd == "TYPE" and len(command) == 2:
-            handle_type(connection, command[1])
-        elif cmd == "XADD" and len(command) >= 4:
-            handle_xadd(connection, command[1], command[2], command[3:])
-        elif cmd == "XRANGE" and len(command) == 4:
-            handle_xrange(connection, command[1], command[2], command[3])
-        elif cmd == "XREAD" and len(command) >= 4:
-            if command[1].upper() == "BLOCK":
-                try:
-                    block_time = int(command[2]) / 1000.0
-                    handle_xread(connection, command[4:], block=block_time)
-                except ValueError:
-                    connection.sendall(b"-ERR invalid BLOCK value\r\n")
+            command = redis_protocol_decode(data.decode())
+            print(f"Received command: {command}")
+            cmd = command[0].upper() if command else None
+            if cmd == "PING":
+                handle_ping(connection)
+            elif cmd == "ECHO" and len(command) == 2:
+                handle_echo(connection, command[1])
+            elif cmd == "SET" and len(command) >= 3:
+                handle_set(connection, command[1:])
+            elif cmd == "GET" and len(command) == 2:
+                handle_get(connection, command[1])
+            elif cmd == "RPUSH" and len(command) >= 3:
+                handle_rpush(connection, command[1], command[2:])
+            elif cmd == "LRANGE" and len(command) == 4:
+                handle_lrange(connection, command[1], command[2], command[3])
+            elif cmd == "LPUSH" and len(command) >= 3:
+                handle_lpush(connection, command[1], command[2:])
+            elif cmd == "LLEN" and len(command) == 2:
+                handle_llen(connection, command[1])
+            elif cmd == "LPOP" and len(command) >= 2:
+                handle_lpop(connection, command[1:])
+            elif cmd == "BLPOP" and len(command) == 3:
+                handle_blpop(connection, command[1], command[2])
+            elif cmd == "TYPE" and len(command) == 2:
+                handle_type(connection, command[1])
+            elif cmd == "XADD" and len(command) >= 4:
+                handle_xadd(connection, command[1], command[2], command[3:])
+            elif cmd == "XRANGE" and len(command) == 4:
+                handle_xrange(connection, command[1], command[2], command[3])
+            elif cmd == "XREAD" and len(command) >= 4:
+                if command[1].upper() == "BLOCK":
+                    try:
+                        block_time = int(command[2]) / 1000.0
+                        handle_xread(connection, command[4:], block=block_time)
+                    except ValueError:
+                        connection.sendall(b"-ERR invalid BLOCK value\r\n")
+                else:
+                    handle_xread(connection, command[2:], )
+            elif cmd == "INCR" and len(command) == 2:
+                handle_incr(connection, command[1])
+            elif cmd == "MULTI" and len(command) == 1:
+                handle_multi(connection)
+            elif cmd == "EXEC" and len(command) == 1:
+                handle_exec(connection)
             else:
-                handle_xread(connection, command[2:], )
-        elif cmd == "INCR" and len(command) == 2:
-            handle_incr(connection, command[1])
-        elif cmd == "MULTI" and len(command) == 1:
-            handle_multi(connection)
-        elif cmd == "EXEC" and len(command) == 1:
-            handle_exec(connection)
-        else:
-            connection.sendall(b"-ERR unknown command\r\n")
-    connection.close()
+                connection.sendall(b"-ERR unknown command\r\n")
+    finally:
+        conn_id = id(connection)
+        if conn_id in connection_states:
+            del connection_states[conn_id]
+        connection.close()
 
 
 def main():
