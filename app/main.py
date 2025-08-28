@@ -393,6 +393,7 @@ def handle_exec(connection):
     for command in commands:
         execute_command(connection, command)
     del connection_states[conn_id]
+    return None
 
 
 def queue_command(connection, command):
@@ -402,6 +403,14 @@ def queue_command(connection, command):
         connection.sendall(b"+QUEUED\r\n")
         return True
     return False
+
+
+def handle_discard(connection):
+    conn_id = id(connection)
+    if conn_id not in connection_states or not connection_states[conn_id].get('in_transaction'):
+        return connection.sendall(b"-ERR DISCARD without MULTI\r\n")
+    del connection_states[conn_id]
+    return connection.sendall(b"+OK\r\n")
 
 
 def execute_command(connection, command):
@@ -464,6 +473,9 @@ def send_response(connection):
                 continue
             elif cmd == "EXEC" and len(command) == 1:
                 handle_exec(connection)
+                continue
+            elif cmd == "DISCARD" and len(command) == 1:
+                handle_discard(connection)
                 continue
             elif queue_command(connection, command):
                 continue
