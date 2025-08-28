@@ -376,6 +376,11 @@ def handle_incr(connection, key):
 def handle_multi(connection):
     return connection.sendall(b"+OK\r\n")
 
+
+def handle_exec(connection):
+    return connection.sendall(b"-ERR EXEC without MULTI\r\n")
+
+
 def send_response(connection):
     while True:
         data = connection.recv(1024)
@@ -424,6 +429,8 @@ def send_response(connection):
             handle_incr(connection, command[1])
         elif cmd == "MULTI" and len(command) == 1:
             handle_multi(connection)
+        elif cmd == "EXEC" and len(command) == 1:
+            handle_exec(connection)
         else:
             connection.sendall(b"-ERR unknown command\r\n")
     connection.close()
