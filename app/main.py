@@ -416,10 +416,15 @@ def handle_discard(connection):
 
 
 def handle_info(connection, section=None):
-    print(section)
     if section and section.upper() == "REPLICATION":
         role = "slave" if replica_of else "master"
         response = f"role:{role}\r\n"
+        # response = f"${len(role_info)}\r\n{role_info}\r\n"
+        response += f"master_replid:8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb\r\n"
+        # response += f"${len(master_replid)}\r\n{master_replid}\r\n"
+        response += f"master_repl_offset:0\r\n"
+        # response += f"${len(master_repl_offset)}\r\n{master_repl_offset}\r\n"
+        print(response)
         return connection.sendall(f"${len(response)}\r\n{response}\r\n".encode())
     else:
         return connection.sendall(b"-ERR unsupported INFO section\r\n")
