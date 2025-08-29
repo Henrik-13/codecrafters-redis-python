@@ -472,10 +472,10 @@ def execute_command(connection, command):
     elif cmd == "REPLCONF":
         connection.sendall(b"+OK\r\n")
     elif cmd == "PSYNC" and len(command) == 3:
-        if replica_of:
-            connection.sendall(b"+FULLRESYNC 8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb 0\r\n")
-        else:
-            connection.sendall(b"-ERR Not a replica\r\n")
+        # if replica_of:
+        connection.sendall(b"+FULLRESYNC 8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb 0\r\n")
+        # else:
+        #     connection.sendall(b"-ERR Not a replica\r\n")
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
@@ -568,7 +568,6 @@ def main(args):
             print("Connected to master at {}:{}".format(master_host, master_port))
         else:
             print("Failed to connect to master at {}:{}".format(master_host, master_port))
-            return
 
     # Uncomment this to pass the first stage
     #
