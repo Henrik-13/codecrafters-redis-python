@@ -471,6 +471,11 @@ def execute_command(connection, command):
         handle_info(connection, section)
     elif cmd == "REPLCONF":
         connection.sendall(b"+OK\r\n")
+    elif cmd == "PSYNC" and len(command) == 3:
+        if replica_of:
+            connection.sendall(b"+FULLRESYNC 8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb 0\r\n")
+        else:
+            connection.sendall(b"-ERR Not a replica\r\n")
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
@@ -519,7 +524,6 @@ def connect_to_master(host, port, replica_port):
             master_socket.close()
             return None
         replconf_command = f"*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${len(str(replica_port))}\r\n{replica_port}\r\n"
-        print(replconf_command)
         master_socket.sendall(replconf_command.encode())
         response = master_socket.recv(1024)
         if response != b"+OK\r\n":
@@ -532,6 +536,14 @@ def connect_to_master(host, port, replica_port):
         response = master_socket.recv(1024)
         if response != b"+OK\r\n":
             print("Failed to receive OK from master for REPLCONF capa")
+            master_socket.close()
+            return None
+
+        psync_command = b"*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n"
+        master_socket.sendall(psync_command)
+        response = master_socket.recv(1024)
+        if not response.startswith(b"+FULLRESYNC"):
+            print("Failed to receive FULLRESYNC from master")
             master_socket.close()
             return None
 
