@@ -419,12 +419,8 @@ def handle_info(connection, section=None):
     if section and section.upper() == "REPLICATION":
         role = "slave" if replica_of else "master"
         response = f"role:{role}\r\n"
-        # response = f"${len(role_info)}\r\n{role_info}\r\n"
         response += f"master_replid:8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb\r\n"
-        # response += f"${len(master_replid)}\r\n{master_replid}\r\n"
         response += f"master_repl_offset:0\r\n"
-        # response += f"${len(master_repl_offset)}\r\n{master_repl_offset}\r\n"
-        print(response)
         return connection.sendall(f"${len(response)}\r\n{response}\r\n".encode())
     else:
         return connection.sendall(b"-ERR unsupported INFO section\r\n")
@@ -508,6 +504,26 @@ def send_response(connection):
         connection.close()
 
 
+def connect_to_master(host, port):
+    try:
+        master_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        master_socket.connect((host, port))
+
+        ping_command = b"*1\r\n$4\r\nPING\r\n"
+        master_socket.sendall(ping_command)
+        response = master_socket.recv(1024)
+        if response != b"+PONG\r\n":
+            print("Failed to receive PONG from master")
+            master_socket.close()
+            return None
+
+        print(f"Connected to master at {host}:{port}")
+        return master_socket
+    except Exception as e:
+        print(f"Failed to connect to master at {host}:{port}: {e}")
+        return None
+
+
 def main(args):
     # You can use print statements as follows for debugging, they'll be visible when running tests.
     print("Logs from your program will appear here!")
@@ -515,6 +531,14 @@ def main(args):
     global replica_of
     if args.replicaof:
         replica_of = args.replicaof
+        master_host, master_port = args.replicaof.split()
+
+        master_connection = connect_to_master(master_host, int(master_port))
+        if master_connection:
+            print("Connected to master at {}:{}".format(master_host, master_port))
+        else:
+            print("Failed to connect to master at {}:{}".format(master_host, master_port))
+            return
 
     # Uncomment this to pass the first stage
     #
