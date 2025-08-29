@@ -10,6 +10,8 @@ list_dict = {}
 streams = {}
 connection_states = {}
 
+replica_of = None
+
 
 # def redis_protocol_encode(command):
 #     print("Encoding command:", command)
@@ -172,7 +174,7 @@ def handle_blpop(connection, key, timeout):
             threading.Event().wait(0.1)
         else:
             if start_time and (time.time() - start_time) >= timeout:
-                return connection.sendall(b"$-1\r\n")
+                return connection.sendall(b"*-1\r\n")
             threading.Event().wait(0.1)
 
 
@@ -359,7 +361,7 @@ def handle_xread(connection, args, block=None):
             return connection.sendall(b"*0\r\n")
 
         if 0 < block <= (time.time() - start_time) and start_time:
-            return connection.sendall(b"$-1\r\n")
+            return connection.sendall(b"*-1\r\n")
 
         threading.Event().wait(0.1)
 
@@ -414,10 +416,13 @@ def handle_discard(connection):
 
 
 def handle_info(connection, section=None):
-    # if section and section.upper() != "REPLICATION":
-    return connection.sendall(b"$11\r\nrole:master\r\n")
-    # else:
-    #     return connection.sendall(b"-ERR unsupported INFO section\r\n")
+    print(section)
+    if section and section.upper() == "REPLICATION":
+        role = "slave" if replica_of else "master"
+        response = f"role:{role}\r\n"
+        return connection.sendall(f"${len(response)}\r\n{response}\r\n".encode())
+    else:
+        return connection.sendall(b"-ERR unsupported INFO section\r\n")
 
 
 def execute_command(connection, command):
@@ -460,8 +465,9 @@ def execute_command(connection, command):
             handle_xread(connection, command[2:], )
     elif cmd == "INCR" and len(command) == 2:
         handle_incr(connection, command[1])
-    elif cmd == "INFO":
-        handle_info(connection, command[1])
+    elif cmd == "INFO" and len(command) >= 1:
+        section = command[1] if len(command) == 2 else None
+        handle_info(connection, section)
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
@@ -501,6 +507,10 @@ def main(args):
     # You can use print statements as follows for debugging, they'll be visible when running tests.
     print("Logs from your program will appear here!")
 
+    global replica_of
+    if args.replicaof:
+        replica_of = args.replicaof
+
     # Uncomment this to pass the first stage
     #
     server_socket = socket.create_server(("localhost", int(args.port)), reuse_port=True)
@@ -512,5 +522,6 @@ def main(args):
 
 if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=6379, help="Port to listen on")
+    parser.add_argument("--replicaof", type=str, help="Replication source in host:port format")
     args = parser.parse_args()
     main(args)
