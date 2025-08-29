@@ -469,6 +469,8 @@ def execute_command(connection, command):
     elif cmd == "INFO" and len(command) >= 1:
         section = command[1] if len(command) == 2 else None
         handle_info(connection, section)
+    elif cmd == "REPLCONF":
+        connection.sendall(b"+OK\r\n")
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
@@ -504,7 +506,7 @@ def send_response(connection):
         connection.close()
 
 
-def connect_to_master(host, port):
+def connect_to_master(host, port, replica_port):
     try:
         master_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         master_socket.connect((host, port))
@@ -514,6 +516,22 @@ def connect_to_master(host, port):
         response = master_socket.recv(1024)
         if response != b"+PONG\r\n":
             print("Failed to receive PONG from master")
+            master_socket.close()
+            return None
+        replconf_command = f"*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${len(str(replica_port))}\r\n{replica_port}\r\n"
+        print(replconf_command)
+        master_socket.sendall(replconf_command.encode())
+        response = master_socket.recv(1024)
+        if response != b"+OK\r\n":
+            print("Failed to receive OK from master for REPLCONF")
+            master_socket.close()
+            return None
+
+        replconf_command = b"*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n"
+        master_socket.sendall(replconf_command)
+        response = master_socket.recv(1024)
+        if response != b"+OK\r\n":
+            print("Failed to receive OK from master for REPLCONF capa")
             master_socket.close()
             return None
 
@@ -533,7 +551,7 @@ def main(args):
         replica_of = args.replicaof
         master_host, master_port = args.replicaof.split()
 
-        master_connection = connect_to_master(master_host, int(master_port))
+        master_connection = connect_to_master(master_host, int(master_port), args.port)
         if master_connection:
             print("Connected to master at {}:{}".format(master_host, master_port))
         else:
@@ -551,6 +569,6 @@ def main(args):
 
 if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=6379, help="Port to listen on")
-    parser.add_argument("--replicaof", type=str, help="Replication source in host:port format")
+    parser.add_argument("--replicaof", type=str, help="Replication source in host port format")
     args = parser.parse_args()
     main(args)
