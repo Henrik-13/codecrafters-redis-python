@@ -63,7 +63,6 @@ def handle_ping(connection):
 
 def handle_echo(connection, message):
     response = f"${len(message)}\r\n{message}\r\n"
-    print("Sending response:", response)
     return connection.sendall(response.encode())
 
 
