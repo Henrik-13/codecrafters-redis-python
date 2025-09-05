@@ -8,9 +8,11 @@ parser = argparse.ArgumentParser()
 dictionary = {}
 list_dict = {}
 streams = {}
-connection_states = {}
+connections = {}
 
 replica_of = None
+replicas = []
+write_commands = {"SET", "DEL", "INCR", "DECR", "RPUSH", "LPUSH", "LPOP", "XADD"}
 
 
 # def redis_protocol_encode(command):
@@ -381,27 +383,27 @@ def handle_incr(connection, key):
 
 def handle_multi(connection):
     conn_id = id(connection)
-    connection_states[conn_id] = {'in_transaction': True, 'commands': []}
+    connections[conn_id] = {'in_transaction': True, 'commands': []}
     return connection.sendall(b"+OK\r\n")
 
 
 def handle_exec(connection):
     conn_id = id(connection)
-    if conn_id not in connection_states or not connection_states[conn_id].get('in_transaction'):
+    if conn_id not in connections or not connections[conn_id].get('in_transaction'):
         return connection.sendall(b"-ERR EXEC without MULTI\r\n")
 
-    commands = connection_states[conn_id]['commands']
+    commands = connections[conn_id]['commands']
     connection.sendall(f"*{len(commands)}\r\n".encode())
     for command in commands:
         execute_command(connection, command)
-    del connection_states[conn_id]
+    del connections[conn_id]
     return None
 
 
 def queue_command(connection, command):
     conn_id = id(connection)
-    if conn_id in connection_states and connection_states[conn_id].get('in_transaction'):
-        connection_states[conn_id]['commands'].append(command)
+    if conn_id in connections and connections[conn_id].get('in_transaction'):
+        connections[conn_id]['commands'].append(command)
         connection.sendall(b"+QUEUED\r\n")
         return True
     return False
@@ -409,9 +411,9 @@ def queue_command(connection, command):
 
 def handle_discard(connection):
     conn_id = id(connection)
-    if conn_id not in connection_states or not connection_states[conn_id].get('in_transaction'):
+    if conn_id not in connections or not connections[conn_id].get('in_transaction'):
         return connection.sendall(b"-ERR DISCARD without MULTI\r\n")
-    del connection_states[conn_id]
+    del connections[conn_id]
     return connection.sendall(b"+OK\r\n")
 
 
@@ -428,10 +430,19 @@ def handle_info(connection, section=None):
 
 def handle_psync(connection, args):
     connection.sendall(b"+FULLRESYNC 8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb 0\r\n")
-    # empty_rdb_file = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog=="
     empty_rdb_file = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2"
     rdb_file_encoded = bytes.fromhex(empty_rdb_file)
     connection.sendall(f"${len(rdb_file_encoded)}\r\n".encode() + rdb_file_encoded)
+
+    replicas.append(connection)
+
+
+def propagate_to_replicas(command):
+    for replica in replicas[:]:
+        try:
+            replica.sendall(command)
+        except Exception:
+            replicas.remove(replica)
 
 def execute_command(connection, command):
     cmd = command[0].upper() if command else None
@@ -479,10 +490,6 @@ def execute_command(connection, command):
     elif cmd == "REPLCONF":
         connection.sendall(b"+OK\r\n")
     elif cmd == "PSYNC" and len(command) == 3:
-        # if replica_of:
-        # connection.sendall(b"+FULLRESYNC 8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb 0\r\n")
-        # else:
-        #     connection.sendall(b"-ERR Not a replica\r\n")
         handle_psync(connection, command[1:])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
@@ -512,10 +519,15 @@ def send_response(connection):
                 continue
             else:
                 execute_command(connection, command)
+
+                if not replica_of and cmd in write_commands:
+                    propagate_to_replicas(data)
     finally:
         conn_id = id(connection)
-        if conn_id in connection_states:
-            del connection_states[conn_id]
+        if conn_id in connections:
+            del connections[conn_id]
+        if connection in replicas:
+            replicas.remove(connection)
         connection.close()
 
 
