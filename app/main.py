@@ -426,6 +426,13 @@ def handle_info(connection, section=None):
         return connection.sendall(b"-ERR unsupported INFO section\r\n")
 
 
+def handle_psync(connection, args):
+    connection.sendall(b"+FULLRESYNC 8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb 0\r\n")
+    # empty_rdb_file = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog=="
+    empty_rdb_file = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2"
+    rdb_file_encoded = bytes.fromhex(empty_rdb_file)
+    connection.sendall(f"${len(rdb_file_encoded)}\r\n".encode() + rdb_file_encoded)
+
 def execute_command(connection, command):
     cmd = command[0].upper() if command else None
 
@@ -473,9 +480,10 @@ def execute_command(connection, command):
         connection.sendall(b"+OK\r\n")
     elif cmd == "PSYNC" and len(command) == 3:
         # if replica_of:
-        connection.sendall(b"+FULLRESYNC 8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb 0\r\n")
+        # connection.sendall(b"+FULLRESYNC 8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb 0\r\n")
         # else:
         #     connection.sendall(b"-ERR Not a replica\r\n")
+        handle_psync(connection, command[1:])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
