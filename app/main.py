@@ -24,9 +24,9 @@ def parse_bulk_string(buffer, s_len):
     if len(buffer) >= 9 and buffer[:9] == RDB_HEADER:
         print("Detected RDB file, skipping...")
         # Skip the entire RDB file
-        remaining_buffer = buffer[s_len:]
+        remaining_buffer = buffer[s_len + 2:]  # +2 for \r\n after RDB length
         print("RDB file skipped, ready for replication commands")
-        return None, remaining_buffer, 0
+        return None, remaining_buffer, s_len + 2  # Return actual bytes consumed
     
     if len(buffer) < s_len + 2:  # +2 for \r\n
         return None, buffer, 0  # Not enough data
@@ -47,10 +47,15 @@ def parse_array(buffer, num_args):
         if element is None and bytes_processed == 0:
             return None, buffer, 0  # Not enough data
         total_bytes += bytes_processed
-        if element is not None: 
-            elements.append(element)
+        # Add all elements, even None ones, to maintain array structure
+        elements.append(element)
 
-    return elements, current_buffer, total_bytes
+    # Filter out None elements but only if they represent skipped RDB data
+    # Keep None elements that are actual null values in Redis protocol
+    filtered_elements = [e for e in elements if e is not None]
+    
+    # If we have any valid elements, return them, otherwise return the full array
+    return filtered_elements if filtered_elements else elements, current_buffer, total_bytes
 
 
 def parse_stream(buffer):
@@ -86,23 +91,20 @@ def parse_stream(buffer):
 def parse_commands(buffer):
     commands = []
     current_buffer = buffer
-    total_bytes = 0
     
     while current_buffer:
         initial_buffer_len = len(current_buffer)
         command, current_buffer, bytes_processed = parse_stream(current_buffer)
 
-        if command is None and bytes_processed == 0:
-            # If buffer didn't change, we don't have enough data
+        # If we didn't process any bytes, we don't have enough data
+        if bytes_processed == 0:
             break
-        elif command is not None and isinstance(command, list):
-            total_bytes += bytes_processed
+            
+        # If we got a valid command (not None/RDB), add it
+        if command is not None and isinstance(command, list) and len(command) > 0:
             commands.append((command, bytes_processed))
-        elif bytes_processed > 0:
-            # We processed some bytes but got None (like RDB file skip)
-            total_bytes += bytes_processed
 
-    return commands, current_buffer, total_bytes
+    return commands, current_buffer, 0
 
 
 def handle_ping(connection):
