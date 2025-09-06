@@ -47,19 +47,20 @@ def parse_array(buffer, num_args):
         if element is None and bytes_processed == 0:
             return None, buffer, 0  # Not enough data
         total_bytes += bytes_processed
-        elements.append(element)
+        if element is not None: 
+            elements.append(element)
 
     return elements, current_buffer, total_bytes
 
 
 def parse_stream(buffer):
     if not buffer:
-        return None, buffer
+        return None, buffer, 0
         
     # Find the first \r\n
     crlf_pos = buffer.find(b'\r\n')
     if crlf_pos == -1:
-        return None, buffer  # Not enough data
+        return None, buffer, 0  # Not enough data
         
     header = buffer[:crlf_pos].decode()
     remaining_buffer = buffer[crlf_pos + 2:]
@@ -91,20 +92,22 @@ def parse_commands(buffer):
         initial_buffer_len = len(current_buffer)
         command, current_buffer, bytes_processed = parse_stream(current_buffer)
 
-        if command is None:
+        if command is None and bytes_processed == 0:
             # If buffer didn't change, we don't have enough data
-            if len(current_buffer) == initial_buffer_len:
-                break
-        else:
+            break
+        elif command is not None and isinstance(command, list):
             total_bytes += bytes_processed
-            # Only add non-None commands (skip RDB files)
-            if isinstance(command, list):
-                commands.append((command, bytes_processed))
+            commands.append((command, bytes_processed))
+        elif bytes_processed > 0:
+            # We processed some bytes but got None (like RDB file skip)
+            total_bytes += bytes_processed
 
     return commands, current_buffer, total_bytes
 
 
 def handle_ping(connection):
+    if connection == master_connection_socket:
+        return None
     return connection.sendall(b"+PONG\r\n")
 
 
