@@ -591,10 +591,6 @@ def send_response(connection):
                     continue
                     
                 print(f"Received command: {command}")
-
-                if connection == master_connection_socket:
-                    replica_offset += bytes_processed
-                
                 cmd = command[0].upper() if command else None
 
                 if cmd == "MULTI" and len(command) == 1:
@@ -614,6 +610,9 @@ def send_response(connection):
                     # Propagate write commands to replicas (only from master, not from other replicas)
                     if not replica_of and cmd in write_commands and connection != master_connection_socket:
                         propagate_to_replicas(command)
+            
+                if connection == master_connection_socket:
+                    replica_offset += bytes_processed
                         
     except Exception as e:
         print(f"Error in send_response: {e}")
