@@ -14,6 +14,9 @@ replica_of = None
 replicas = []
 write_commands = {"SET", "DEL", "INCR", "DECR", "RPUSH", "LPUSH", "LPOP", "XADD"}
 
+master_connection_socket = None
+RDB_HEADER = b'\x52\x45\x44\x49\x53\x30\x30\x31\x31'  # "REDIS0011"
+
 
 # def redis_protocol_encode(command):
 #     print("Encoding command:", command)
@@ -26,35 +29,62 @@ write_commands = {"SET", "DEL", "INCR", "DECR", "RPUSH", "LPUSH", "LPOP", "XADD"
 #     return result
 
 
-def redis_protocol_decode(data):
-    lines = data.split("\r\n")
-    if not lines or lines[0] == "":
-        return None
+# def redis_protocol_decode(data):
+#     lines = data.split("\r\n")
+#     if not lines or lines[0] == "":
+#         return None
 
-    if lines[0][0] != "*":
-        return None
+#     if lines[0][0] != "*":
+#         return None
 
+#     try:
+#         num_elements = int(lines[0][1:])
+#     except ValueError:
+#         return None
+
+#     elements = []
+#     index = 1
+#     for _ in range(num_elements):
+#         if index >= len(lines) or lines[index][0] != "$":
+#             return None
+#         try:
+#             length = int(lines[index][1:])
+#         except ValueError:
+#             return None
+#         index += 1
+#         if index >= len(lines) or len(lines[index]) != length:
+#             return None
+#         elements.append(lines[index])
+#         index += 1
+
+#     return elements if len(elements) == num_elements else None
+
+
+def parse_command(data):
+    if not data:
+        return None, data
+    if data[0] != '*':
+        return None, data
+    first, rest = data.split("\r\n", 1)
     try:
-        num_elements = int(lines[0][1:])
+        num_elements = int(first[1:])
     except ValueError:
-        return None
-
+        return None, data
     elements = []
-    index = 1
     for _ in range(num_elements):
-        if index >= len(lines) or lines[index][0] != "$":
-            return None
+        if not rest or rest[0] != '$':
+            return None, data
+        length_str, rest = rest.split("\r\n", 1)
         try:
-            length = int(lines[index][1:])
+            length = int(length_str[1:])
         except ValueError:
-            return None
-        index += 1
-        if index >= len(lines) or len(lines[index]) != length:
-            return None
-        elements.append(lines[index])
-        index += 1
-
-    return elements if len(elements) == num_elements else None
+            return None, data
+        if len(rest) < length + 2:
+            return None, data
+        element = rest[:length]
+        elements.append(element)
+        rest = rest[length + 2:]
+    return elements, rest
 
 
 def handle_ping(connection):
@@ -76,7 +106,13 @@ def handle_set(connection, args):
             threading.Timer(expire_time, lambda: dictionary.pop(key, None)).start()
         except (ValueError, IndexError):
             return connection.sendall(b"-ERR invalid PX value\r\n")
-    return connection.sendall(b"+OK\r\n")
+    
+    if connection == master_connection_socket:
+        return None
+
+    if connection not in replicas:
+        return connection.sendall(b"+OK\r\n")
+    return None
 
 
 def handle_get(connection, key):
@@ -436,12 +472,18 @@ def handle_psync(connection, args):
     replicas.append(connection)
 
 
-def propagate_to_replicas(command):
+
+def propagate_to_replicas(command_array):
+    encoded_command = f"*{len(command_array)}\r\n"
+    for arg in command_array:
+        encoded_command += f"${len(arg)}\r\n{arg}\r\n"  
+
     for replica in replicas[:]:
         try:
-            replica.sendall(command)
+            replica.sendall(encoded_command.encode())
         except Exception:
             replicas.remove(replica)
+
 
 def execute_command(connection, command):
     cmd = command[0].upper() if command else None
@@ -496,31 +538,65 @@ def execute_command(connection, command):
 
 def send_response(connection):
     try:
+        rdb_skipped = False
+        
         while True:
             data = connection.recv(1024)
             if not data:
                 break
 
-            command = redis_protocol_decode(data.decode())
-            print(f"Received command: {command}")
-            cmd = command[0].upper() if command else None
+            if connection == master_connection_socket and not rdb_skipped:
+                if RDB_HEADER in data:
+                    print("Detected RDB file, skipping...")
+                    rdb_start = data.find(RDB_HEADER)
+                    if rdb_start > 0:
+                        pre_rdb_data = data[:rdb_start].decode()
+                        if pre_rdb_data.strip():
+                            while pre_rdb_data:
+                                command, pre_rdb_data = parse_command(pre_rdb_data)
+                                if not command:
+                                    break
+                                print(f"Received command before RDB: {command}")
+                                execute_command(connection, command)
+                    
+                    remaining_rdb = connection.recv(4096)  # Read more RDB data
+                    rdb_skipped = True
+                    print("RDB file skipped, ready for replication commands")
+                    continue
+                elif data.startswith(b'*') or data.startswith(b'+') or data.startswith(b'-') or data.startswith(b':') or data.startswith(b'$'):
+                    rdb_skipped = True
+                else:
+                    print("Skipping potential RDB data chunk")
+                    continue
 
-            if cmd == "MULTI" and len(command) == 1:
-                handle_multi(connection)
-                continue
-            elif cmd == "EXEC" and len(command) == 1:
-                handle_exec(connection)
-                continue
-            elif cmd == "DISCARD" and len(command) == 1:
-                handle_discard(connection)
-                continue
-            elif queue_command(connection, command):
-                continue
-            else:
-                execute_command(connection, command)
+            # command = redis_protocol_decode(data.decode())
+            data = data.decode()
+            while data:
+                command, data = parse_command(data)
+                print("Data after parsing command:", data)
+                print(f"Received command: {command}")
+                
+                if not command:
+                    break
+                    
+                cmd = command[0].upper() if command else None
 
-                if not replica_of and cmd in write_commands:
-                    propagate_to_replicas(data)
+                if cmd == "MULTI" and len(command) == 1:
+                    handle_multi(connection)
+                    continue
+                elif cmd == "EXEC" and len(command) == 1:
+                    handle_exec(connection)
+                    continue
+                elif cmd == "DISCARD" and len(command) == 1:
+                    handle_discard(connection)
+                    continue
+                elif queue_command(connection, command):
+                    continue
+                else:
+                    execute_command(connection, command)
+
+                    if not replica_of and cmd in write_commands and connection != master_connection_socket:
+                        propagate_to_replicas(command)
     finally:
         conn_id = id(connection)
         if conn_id in connections:
@@ -542,6 +618,7 @@ def connect_to_master(host, port, replica_port):
             print("Failed to receive PONG from master")
             master_socket.close()
             return None
+
         replconf_command = f"*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${len(str(replica_port))}\r\n{replica_port}\r\n"
         master_socket.sendall(replconf_command.encode())
         response = master_socket.recv(1024)
@@ -576,21 +653,21 @@ def connect_to_master(host, port, replica_port):
 def main(args):
     # You can use print statements as follows for debugging, they'll be visible when running tests.
     print("Logs from your program will appear here!")
+    server_socket = socket.create_server(("localhost", int(args.port)), reuse_port=True)
 
-    global replica_of
+    global replica_of, master_connection_socket
     if args.replicaof:
         replica_of = args.replicaof
         master_host, master_port = args.replicaof.split()
 
         master_connection = connect_to_master(master_host, int(master_port), args.port)
         if master_connection:
+            master_connection_socket = master_connection
             print("Connected to master at {}:{}".format(master_host, master_port))
+            threading.Thread(target=send_response, args=(master_connection,)).start()
         else:
             print("Failed to connect to master at {}:{}".format(master_host, master_port))
 
-    # Uncomment this to pass the first stage
-    #
-    server_socket = socket.create_server(("localhost", int(args.port)), reuse_port=True)
     while True:
         connection, _ = server_socket.accept()  # wait for client
         thread = threading.Thread(target=send_response, args=(connection,))
