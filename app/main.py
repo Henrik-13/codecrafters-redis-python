@@ -18,73 +18,81 @@ master_connection_socket = None
 RDB_HEADER = b'\x52\x45\x44\x49\x53\x30\x30\x31\x31'  # "REDIS0011"
 
 
-# def redis_protocol_encode(command):
-#     print("Encoding command:", command)
-#     parts = command.split()
-#     result = ""
-#     if len(parts) > 1:
-#         result += f"*{len(parts)}\r\n"
-#     for part in parts:
-#         result += f"${len(part)}\r\n{part}\r\n"
-#     return result
+def parse_bulk_string(buffer, s_len):
+    # Check for RDB header
+    if len(buffer) >= 9 and buffer[:9] == RDB_HEADER:
+        print("Detected RDB file, skipping...")
+        # Skip the entire RDB file
+        remaining_buffer = buffer[s_len:]
+        print("RDB file skipped, ready for replication commands")
+        return None, remaining_buffer
+    
+    if len(buffer) < s_len + 2:  # +2 for \r\n
+        return None, buffer  # Not enough data
+        
+    bulk_str = buffer[:s_len].decode()
+    remaining_buffer = buffer[s_len + 2:]  # +2 for \r\n
+    return bulk_str, remaining_buffer
 
 
-# def redis_protocol_decode(data):
-#     lines = data.split("\r\n")
-#     if not lines or lines[0] == "":
-#         return None
-
-#     if lines[0][0] != "*":
-#         return None
-
-#     try:
-#         num_elements = int(lines[0][1:])
-#     except ValueError:
-#         return None
-
-#     elements = []
-#     index = 1
-#     for _ in range(num_elements):
-#         if index >= len(lines) or lines[index][0] != "$":
-#             return None
-#         try:
-#             length = int(lines[index][1:])
-#         except ValueError:
-#             return None
-#         index += 1
-#         if index >= len(lines) or len(lines[index]) != length:
-#             return None
-#         elements.append(lines[index])
-#         index += 1
-
-#     return elements if len(elements) == num_elements else None
-
-
-def parse_command(data):
-    if not data:
-        return None, data
-    if data[0] != '*':
-        return None, data
-    first, rest = data.split("\r\n", 1)
-    try:
-        num_elements = int(first[1:])
-    except ValueError:
-        return None, data
+def parse_array(buffer, num_args):
     elements = []
-    for _ in range(num_elements):
-        if not rest or rest[0] != '$':
-            return None, data
-        length_str, rest = rest.split("\r\n", 1)
-        try:
-            length = int(length_str[1:])
-        except ValueError:
-            return None, data
-        if len(rest) < length + 2:
-            return None, data
-        element = rest[:length]
+    current_buffer = buffer
+    
+    for _ in range(num_args):
+        element, current_buffer = parse_stream(current_buffer)
+        if element is None:
+            return None, buffer  # Not enough data
         elements.append(element)
-        rest = rest[length + 2:]
-    return elements, rest
+    
+    return elements, current_buffer
+
+
+def parse_stream(buffer):
+    if not buffer:
+        return None, buffer
+        
+    # Find the first \r\n
+    crlf_pos = buffer.find(b'\r\n')
+    if crlf_pos == -1:
+        return None, buffer  # Not enough data
+        
+    header = buffer[:crlf_pos].decode()
+    remaining_buffer = buffer[crlf_pos + 2:]
+    cmd_type = header[0]
+    
+    if cmd_type == '*':
+        num_args = int(header[1:])
+        return parse_array(remaining_buffer, num_args)
+    elif cmd_type == '$':
+        s_len = int(header[1:])
+        if s_len >= 0:
+            return parse_bulk_string(remaining_buffer, s_len)
+        else:
+            return None, remaining_buffer  # Null bulk string
+    else:
+        # Handle other types if needed
+        return None, remaining_buffer
+
+
+def parse_commands(buffer):
+    commands = []
+    current_buffer = buffer
+    
+    while current_buffer:
+        initial_buffer_len = len(current_buffer)
+        command, current_buffer = parse_stream(current_buffer)
+        
+        if command is None:
+            # If buffer didn't change, we don't have enough data
+            if len(current_buffer) == initial_buffer_len:
+                break
+        else:
+            # Only add non-None commands (skip RDB files)
+            if isinstance(command, list):
+                commands.append(command)
+                
+    return commands, current_buffer
 
 
 def handle_ping(connection):
@@ -485,6 +493,14 @@ def propagate_to_replicas(command_array):
             replicas.remove(replica)
 
 
+def handle_replconf(connection, cmd):
+    print("Handling REPLCONF command:", cmd)
+    if len(cmd) >= 1 and cmd[0].upper() == "GETACK":
+        connection.sendall(b"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n")
+    else:
+        connection.sendall(b"+OK\r\n")
+
+
 def execute_command(connection, command):
     cmd = command[0].upper() if command else None
 
@@ -528,8 +544,8 @@ def execute_command(connection, command):
     elif cmd == "INFO" and len(command) >= 1:
         section = command[1] if len(command) == 2 else None
         handle_info(connection, section)
-    elif cmd == "REPLCONF":
-        connection.sendall(b"+OK\r\n")
+    elif cmd == "REPLCONF" and len(command) >= 2:
+        handle_replconf(connection, command[1:])
     elif cmd == "PSYNC" and len(command) == 3:
         handle_psync(connection, command[1:])
     else:
@@ -538,47 +554,33 @@ def execute_command(connection, command):
 
 def send_response(connection):
     try:
-        rdb_skipped = False
+        buffer = b""
         
         while True:
             data = connection.recv(1024)
             if not data:
                 break
-
-            if connection == master_connection_socket and not rdb_skipped:
-                if RDB_HEADER in data:
-                    print("Detected RDB file, skipping...")
-                    rdb_start = data.find(RDB_HEADER)
-                    if rdb_start > 0:
-                        pre_rdb_data = data[:rdb_start].decode()
-                        if pre_rdb_data.strip():
-                            while pre_rdb_data:
-                                command, pre_rdb_data = parse_command(pre_rdb_data)
-                                if not command:
-                                    break
-                                print(f"Received command before RDB: {command}")
-                                execute_command(connection, command)
-                    
-                    remaining_rdb = connection.recv(4096)  # Read more RDB data
-                    rdb_skipped = True
-                    print("RDB file skipped, ready for replication commands")
+                
+            buffer += data
+            
+            # Parse commands from buffer
+            try:
+                commands, buffer = parse_commands(buffer)
+            except UnicodeDecodeError:
+                # If we can't decode as UTF-8, it's likely binary RDB data for master connection
+                if connection == master_connection_socket:
+                    print("Skipping binary RDB data")
                     continue
-                elif data.startswith(b'*') or data.startswith(b'+') or data.startswith(b'-') or data.startswith(b':') or data.startswith(b'$'):
-                    rdb_skipped = True
                 else:
-                    print("Skipping potential RDB data chunk")
+                    break
+            
+            # Process each parsed command
+            for command in commands:
+                if not command:
                     continue
-
-            # command = redis_protocol_decode(data.decode())
-            data = data.decode()
-            while data:
-                command, data = parse_command(data)
-                print("Data after parsing command:", data)
+                    
                 print(f"Received command: {command}")
                 
-                if not command:
-                    break
-                    
                 cmd = command[0].upper() if command else None
 
                 if cmd == "MULTI" and len(command) == 1:
@@ -595,8 +597,12 @@ def send_response(connection):
                 else:
                     execute_command(connection, command)
 
+                    # Propagate write commands to replicas (only from master, not from other replicas)
                     if not replica_of and cmd in write_commands and connection != master_connection_socket:
                         propagate_to_replicas(command)
+                        
+    except Exception as e:
+        print(f"Error in send_response: {e}")
     finally:
         conn_id = id(connection)
         if conn_id in connections:
