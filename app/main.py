@@ -12,6 +12,7 @@ connections = {}
 
 replica_of = None
 replicas = []
+replica_offset = 0
 write_commands = {"SET", "DEL", "INCR", "DECR", "RPUSH", "LPUSH", "LPOP", "XADD"}
 
 master_connection_socket = None
@@ -25,27 +26,30 @@ def parse_bulk_string(buffer, s_len):
         # Skip the entire RDB file
         remaining_buffer = buffer[s_len:]
         print("RDB file skipped, ready for replication commands")
-        return None, remaining_buffer
+        return None, remaining_buffer, 0
     
     if len(buffer) < s_len + 2:  # +2 for \r\n
-        return None, buffer  # Not enough data
+        return None, buffer, 0  # Not enough data
         
     bulk_str = buffer[:s_len].decode()
     remaining_buffer = buffer[s_len + 2:]  # +2 for \r\n
-    return bulk_str, remaining_buffer
+    bytes_processed = s_len + 2
+    return bulk_str, remaining_buffer, bytes_processed
 
 
 def parse_array(buffer, num_args):
     elements = []
     current_buffer = buffer
+    total_bytes = 0
     
     for _ in range(num_args):
-        element, current_buffer = parse_stream(current_buffer)
-        if element is None:
-            return None, buffer  # Not enough data
+        element, current_buffer, bytes_processed = parse_stream(current_buffer)
+        if element is None and bytes_processed == 0:
+            return None, buffer, 0  # Not enough data
+        total_bytes += bytes_processed
         elements.append(element)
-    
-    return elements, current_buffer
+
+    return elements, current_buffer, total_bytes
 
 
 def parse_stream(buffer):
@@ -60,39 +64,44 @@ def parse_stream(buffer):
     header = buffer[:crlf_pos].decode()
     remaining_buffer = buffer[crlf_pos + 2:]
     cmd_type = header[0]
+    header_bytes = len(header) + 2
     
     if cmd_type == '*':
         num_args = int(header[1:])
-        return parse_array(remaining_buffer, num_args)
+        result, remaining_buffer, bytes_processed = parse_array(remaining_buffer, num_args)
+        return result, remaining_buffer, header_bytes + bytes_processed
     elif cmd_type == '$':
         s_len = int(header[1:])
         if s_len >= 0:
-            return parse_bulk_string(remaining_buffer, s_len)
+            result, remaining_buffer, bytes_processed = parse_bulk_string(remaining_buffer, s_len)
+            return result, remaining_buffer, header_bytes + bytes_processed
         else:
-            return None, remaining_buffer  # Null bulk string
+            return None, remaining_buffer, header_bytes  # Null bulk string
     else:
         # Handle other types if needed
-        return None, remaining_buffer
+        return None, remaining_buffer, header_bytes
 
 
 def parse_commands(buffer):
     commands = []
     current_buffer = buffer
+    total_bytes = 0
     
     while current_buffer:
         initial_buffer_len = len(current_buffer)
-        command, current_buffer = parse_stream(current_buffer)
-        
+        command, current_buffer, bytes_processed = parse_stream(current_buffer)
+
         if command is None:
             # If buffer didn't change, we don't have enough data
             if len(current_buffer) == initial_buffer_len:
                 break
         else:
+            total_bytes += bytes_processed
             # Only add non-None commands (skip RDB files)
             if isinstance(command, list):
-                commands.append(command)
-                
-    return commands, current_buffer
+                commands.append((command, bytes_processed))
+
+    return commands, current_buffer, total_bytes
 
 
 def handle_ping(connection):
@@ -496,7 +505,8 @@ def propagate_to_replicas(command_array):
 def handle_replconf(connection, cmd):
     print("Handling REPLCONF command:", cmd)
     if len(cmd) >= 1 and cmd[0].upper() == "GETACK":
-        connection.sendall(b"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n0\r\n")
+        offset_str = str(replica_offset)
+        connection.sendall(f"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${len(offset_str)}\r\n{offset_str}\r\n".encode())
     else:
         connection.sendall(b"+OK\r\n")
 
@@ -553,6 +563,7 @@ def execute_command(connection, command):
 
 
 def send_response(connection):
+    global replica_offset
     try:
         buffer = b""
         
@@ -565,7 +576,7 @@ def send_response(connection):
             
             # Parse commands from buffer
             try:
-                commands, buffer = parse_commands(buffer)
+                commands_with_bytes, buffer, _ = parse_commands(buffer)
             except UnicodeDecodeError:
                 # If we can't decode as UTF-8, it's likely binary RDB data for master connection
                 if connection == master_connection_socket:
@@ -575,11 +586,14 @@ def send_response(connection):
                     break
             
             # Process each parsed command
-            for command in commands:
+            for command, bytes_processed in commands_with_bytes:
                 if not command:
                     continue
                     
                 print(f"Received command: {command}")
+
+                if connection == master_connection_socket:
+                    replica_offset += bytes_processed
                 
                 cmd = command[0].upper() if command else None
 
