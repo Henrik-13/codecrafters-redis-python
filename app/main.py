@@ -20,21 +20,27 @@ RDB_HEADER = b'\x52\x45\x44\x49\x53\x30\x30\x31\x31'  # "REDIS0011"
 
 
 def parse_bulk_string(buffer, s_len):
-    # Check for RDB header
-    if len(buffer) >= 9 and buffer[:9] == RDB_HEADER:
-        print("Detected RDB file, skipping...")
-        # Skip the entire RDB file
-        remaining_buffer = buffer[s_len + 2:]  # +2 for \r\n after RDB length
-        print("RDB file skipped, ready for replication commands")
-        return None, remaining_buffer, s_len + 2  # Return actual bytes consumed
-    
     if len(buffer) < s_len + 2:  # +2 for \r\n
         return None, buffer, 0  # Not enough data
+    
+    # Check for RDB header in the bulk string data
+    # if s_len >= 9 and buffer[:9] == RDB_HEADER:
+    #     print("Detected RDB file, skipping...")
+    #     # Skip the entire RDB file (the bulk string content + \r\n)
+    #     remaining_buffer = buffer[s_len + 2:]
+    #     print("RDB file skipped, ready for replication commands")
+    #     return None, remaining_buffer, s_len + 2  # Return bytes consumed but no command
         
-    bulk_str = buffer[:s_len].decode()
-    remaining_buffer = buffer[s_len + 2:]  # +2 for \r\n
-    bytes_processed = s_len + 2
-    return bulk_str, remaining_buffer, bytes_processed
+    try:
+        bulk_str = buffer[:s_len].decode('utf-8')
+        remaining_buffer = buffer[s_len + 2:]  # +2 for \r\n
+        bytes_processed = s_len + 2
+        return bulk_str, remaining_buffer, bytes_processed
+    except UnicodeDecodeError:
+        # If we can't decode it, it might be binary data (RDB file)
+        print("Skipping binary data (likely RDB)")
+        remaining_buffer = buffer[s_len + 2:]
+        return None, remaining_buffer, s_len + 2
 
 
 def parse_array(buffer, num_args):
@@ -47,15 +53,15 @@ def parse_array(buffer, num_args):
         if element is None and bytes_processed == 0:
             return None, buffer, 0  # Not enough data
         total_bytes += bytes_processed
-        # Add all elements, even None ones, to maintain array structure
-        elements.append(element)
+        # Only add non-None elements
+        if element is not None:
+            elements.append(element)
 
-    # Filter out None elements but only if they represent skipped RDB data
-    # Keep None elements that are actual null values in Redis protocol
-    filtered_elements = [e for e in elements if e is not None]
-    
-    # If we have any valid elements, return them, otherwise return the full array
-    return filtered_elements if filtered_elements else elements, current_buffer, total_bytes
+    # If we have no valid elements (all were None/RDB), return None
+    if not elements:
+        return None, current_buffer, total_bytes
+        
+    return elements, current_buffer, total_bytes
 
 
 def parse_stream(buffer):
@@ -100,10 +106,11 @@ def parse_commands(buffer):
         if bytes_processed == 0:
             break
             
-        # If we got a valid command (not None/RDB), add it
+        # Only add valid commands (not None/RDB skipped data)
         if command is not None and isinstance(command, list) and len(command) > 0:
             commands.append((command, bytes_processed))
-
+        # If we processed bytes but got None (RDB file), just continue without adding command
+        
     return commands, current_buffer, 0
 
 
@@ -508,7 +515,6 @@ def propagate_to_replicas(command_array):
 
 
 def handle_replconf(connection, cmd):
-    print("Handling REPLCONF command:", cmd)
     if len(cmd) >= 1 and cmd[0].upper() == "GETACK":
         offset_str = str(replica_offset)
         connection.sendall(f"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${len(offset_str)}\r\n{offset_str}\r\n".encode())
@@ -567,58 +573,68 @@ def execute_command(connection, command):
         connection.sendall(b"-ERR unknown command\r\n")
 
 
-def send_response(connection):
+def send_response(connection, initial_buffer=b""):
     global replica_offset
+    buffer = initial_buffer
     try:
-        buffer = b""
-        
         while True:
-            data = connection.recv(1024)
-            if not data:
-                break
-                
-            buffer += data
-            
-            # Parse commands from buffer
-            try:
-                commands_with_bytes, buffer, _ = parse_commands(buffer)
-            except UnicodeDecodeError:
-                # If we can't decode as UTF-8, it's likely binary RDB data for master connection
-                if connection == master_connection_socket:
-                    print("Skipping binary RDB data")
-                    continue
-                else:
-                    break
-            
-            # Process each parsed command
-            for command, bytes_processed in commands_with_bytes:
-                if not command:
-                    continue
-                    
+            # If we have no data, block and wait for more
+            if not buffer:
+                data = connection.recv(1024)
+                if not data:
+                    break  # Connection closed
+                buffer += data
+
+            # Use the reliable parsing functions
+            commands_with_bytes, remaining_buffer, _ = parse_commands(buffer)
+
+            # If no full commands could be parsed, we need more data
+            if not commands_with_bytes:
+                data = connection.recv(1024)
+                if not data:
+                    break # Connection closed
+                buffer += data
+                continue # Go back to the top to try parsing again
+
+            # Process all fully parsed commands
+            for command, command_bytes in commands_with_bytes:
                 print(f"Received command: {command}")
                 cmd = command[0].upper() if command else None
 
-                if cmd == "MULTI" and len(command) == 1:
-                    handle_multi(connection)
-                    continue
-                elif cmd == "EXEC" and len(command) == 1:
-                    handle_exec(connection)
-                    continue
-                elif cmd == "DISCARD" and len(command) == 1:
-                    handle_discard(connection)
-                    continue
-                elif queue_command(connection, command):
-                    continue
-                else:
-                    execute_command(connection, command)
-
-                    # Propagate write commands to replicas (only from master, not from other replicas)
-                    if not replica_of and cmd in write_commands and connection != master_connection_socket:
-                        propagate_to_replicas(command)
-            
+                # Handle commands from the master
                 if connection == master_connection_socket:
-                    replica_offset += bytes_processed
-                        
+                    # For GETACK, respond with the offset *before* this command
+                    if cmd == "REPLCONF" and len(command) > 1 and command[1].upper() == "GETACK":
+                        offset_str = str(replica_offset)
+                        response = f"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${len(offset_str)}\r\n{offset_str}\r\n"
+                        connection.sendall(response.encode())
+                    else:
+                        # For other commands from master, just execute them
+                        execute_command(connection, command)
+
+                    # Update the offset *after* processing the command
+                    replica_offset += command_bytes
+
+                # Handle commands from regular clients
+                else:
+                    if cmd == "MULTI":
+                        handle_multi(connection)
+                    elif cmd == "EXEC":
+                        handle_exec(connection)
+                    elif cmd == "DISCARD":
+                        handle_discard(connection)
+                    elif queue_command(connection, command):
+                        # Command was queued, do nothing else
+                        pass
+                    else:
+                        execute_command(connection, command)
+                        # Propagate write commands if this is a master server
+                        if not replica_of and cmd in write_commands:
+                            propagate_to_replicas(command)
+
+            # Update the buffer with any remaining, unparsed data
+            buffer = remaining_buffer
+
     except Exception as e:
         print(f"Error in send_response: {e}")
     finally:
@@ -635,6 +651,7 @@ def connect_to_master(host, port, replica_port):
         master_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         master_socket.connect((host, port))
 
+        # Handshake steps
         ping_command = b"*1\r\n$4\r\nPING\r\n"
         master_socket.sendall(ping_command)
         response = master_socket.recv(1024)
@@ -661,21 +678,58 @@ def connect_to_master(host, port, replica_port):
 
         psync_command = b"*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n"
         master_socket.sendall(psync_command)
-        response = master_socket.recv(1024)
-        if not response.startswith(b"+FULLRESYNC"):
+        
+        # Read FULLRESYNC response
+        buffer = b""
+        def read_line():
+            nonlocal buffer
+            while True:
+                crlf_pos = buffer.find(b"\r\n")
+                if crlf_pos != -1:
+                    line = buffer[:crlf_pos]
+                    buffer = buffer[crlf_pos + 2:]
+                    return line
+                chunk = master_socket.recv(4096)
+                if not chunk:
+                    return b""
+                buffer += chunk
+
+        # Read +FULLRESYNC line
+        fullresync_line = read_line()
+        if not fullresync_line.startswith(b"+FULLRESYNC"):
             print("Failed to receive FULLRESYNC from master")
             master_socket.close()
             return None
 
+        # Read RDB file length header ($<length>)
+        rdb_header = read_line()
+        if not rdb_header.startswith(b"$"):
+            print("Failed to receive RDB header")
+            master_socket.close()
+            return None
+            
+        rdb_length = int(rdb_header[1:])
+        print(f"RDB file length: {rdb_length}")
+        
+        # Read the exact RDB file content
+        while len(buffer) < rdb_length:
+            chunk = master_socket.recv(min(4096, rdb_length - len(buffer)))
+            if not chunk:
+                break
+            buffer += chunk
+        
+        # Remove RDB data from buffer
+        buffer = buffer[rdb_length:]
+        print("RDB file consumed completely")
+
         print(f"Connected to master at {host}:{port}")
-        return master_socket
+        return master_socket, buffer  # Return remaining buffer
     except Exception as e:
         print(f"Failed to connect to master at {host}:{port}: {e}")
-        return None
+        return None, b""
 
 
 def main(args):
-    # You can use print statements as follows for debugging, they'll be visible when running tests.
     print("Logs from your program will appear here!")
     server_socket = socket.create_server(("localhost", int(args.port)), reuse_port=True)
 
@@ -684,16 +738,16 @@ def main(args):
         replica_of = args.replicaof
         master_host, master_port = args.replicaof.split()
 
-        master_connection = connect_to_master(master_host, int(master_port), args.port)
-        if master_connection:
-            master_connection_socket = master_connection
+        result = connect_to_master(master_host, int(master_port), args.port)
+        if result and result[0]:
+            master_connection_socket, remaining_buffer = result
             print("Connected to master at {}:{}".format(master_host, master_port))
-            threading.Thread(target=send_response, args=(master_connection,)).start()
+            threading.Thread(target=send_response, args=(master_connection_socket, remaining_buffer)).start()
         else:
             print("Failed to connect to master at {}:{}".format(master_host, master_port))
 
     while True:
-        connection, _ = server_socket.accept()  # wait for client
+        connection, _ = server_socket.accept()
         thread = threading.Thread(target=send_response, args=(connection,))
         thread.start()
 
