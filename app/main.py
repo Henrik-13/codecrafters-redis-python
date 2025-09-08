@@ -20,6 +20,9 @@ write_commands = {"SET", "DEL", "INCR", "DECR", "RPUSH", "LPUSH", "LPOP", "XADD"
 master_connection_socket = None
 RDB_HEADER = b'\x52\x45\x44\x49\x53\x30\x30\x31\x31'  # "REDIS0011"
 
+dir = None
+dbfilename = None
+
 
 def parse_bulk_string(buffer, s_len):
     if len(buffer) < s_len + 2:  # +2 for \r\n
@@ -566,6 +569,18 @@ def handle_wait(connection, num_replicas, timeout):
     connection.sendall(f":{acked_replicas}\r\n".encode())
 
 
+def handle_config(connection, args):
+    if args[0].upper() == "GET":
+        if args[1] == "dir":
+            response = f"*2\r\n$3\r\ndir\r\n${len(dir)}\r\n{dir}\r\n"
+            return connection.sendall(response.encode())
+        elif args[1] == "dbfilename":
+            response = f"*2\r\n$11\r\ndbfilename\r\n${len(dbfilename)}\r\n{dbfilename}\r\n"
+            return connection.sendall(response.encode())
+        else:
+            return connection.sendall(b"-ERR unknown CONFIG GET parameter\r\n")
+
+
 def execute_command(connection, command):
     cmd = command[0].upper() if command else None
 
@@ -615,6 +630,8 @@ def execute_command(connection, command):
         handle_psync(connection, command[1:])
     elif cmd == "WAIT" and len(command) == 3:
         handle_wait(connection, command[1], command[2])
+    elif cmd == "CONFIG" and len(command) >= 2:
+        handle_config(connection, command[1:])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
@@ -779,7 +796,7 @@ def main(args):
     print("Logs from your program will appear here!")
     server_socket = socket.create_server(("localhost", int(args.port)), reuse_port=True)
 
-    global replica_of, master_connection_socket
+    global replica_of, master_connection_socket, dir, dbfilename
     if args.replicaof:
         replica_of = args.replicaof
         master_host, master_port = args.replicaof.split()
@@ -792,6 +809,12 @@ def main(args):
         else:
             print("Failed to connect to master at {}:{}".format(master_host, master_port))
 
+    if args.dir:
+        dir = args.dir
+    
+    if args.dbfilename:
+        dbfilename = args.dbfilename
+
     while True:
         connection, _ = server_socket.accept()
         thread = threading.Thread(target=send_response, args=(connection,))
@@ -801,5 +824,7 @@ def main(args):
 if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=6379, help="Port to listen on")
     parser.add_argument("--replicaof", type=str, help="Replication source in host port format")
+    parser.add_argument("--dir", type=str, help="Directory for persistence files")
+    parser.add_argument("--dbfilename", type=str, help="RDB filename")
     args = parser.parse_args()
     main(args)
