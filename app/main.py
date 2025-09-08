@@ -522,6 +522,10 @@ def handle_replconf(connection, cmd):
         connection.sendall(b"+OK\r\n")
 
 
+def handle_wait(connection, num_replicas, timeout):
+    connection.sendall(b":0\r\n")
+
+
 def execute_command(connection, command):
     cmd = command[0].upper() if command else None
 
@@ -569,6 +573,8 @@ def execute_command(connection, command):
         handle_replconf(connection, command[1:])
     elif cmd == "PSYNC" and len(command) == 3:
         handle_psync(connection, command[1:])
+    elif cmd == "WAIT" and len(command) == 3:
+        handle_wait(connection, command[1], command[2])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
