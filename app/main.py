@@ -12,6 +12,8 @@ connections = {}
 
 replica_of = None
 replicas = []
+replica_offsets = {} # Maps replica socket to its last known offset
+master_repl_offset = 0
 replica_offset = 0
 write_commands = {"SET", "DEL", "INCR", "DECR", "RPUSH", "LPUSH", "LPOP", "XADD"}
 
@@ -503,21 +505,29 @@ def handle_psync(connection, args):
 
 
 def propagate_to_replicas(command_array):
+    global master_repl_offset
     encoded_command = f"*{len(command_array)}\r\n"
     for arg in command_array:
-        encoded_command += f"${len(arg)}\r\n{arg}\r\n"  
+        encoded_command += f"${len(arg)}\r\n{arg}\r\n"
+
+    encoded_bytes = encoded_command.encode()
+    master_repl_offset += len(encoded_bytes)
 
     for replica in replicas[:]:
         try:
             replica.sendall(encoded_command.encode())
         except Exception:
             replicas.remove(replica)
+            if replica in replica_offsets:
+                del replica_offsets[replica]
 
 
 def handle_replconf(connection, cmd):
     if len(cmd) >= 1 and cmd[0].upper() == "GETACK":
         offset_str = str(replica_offset)
         connection.sendall(f"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${len(offset_str)}\r\n{offset_str}\r\n".encode())
+    elif len(cmd) >= 2 and cmd[0].upper() == "ACK":
+        replica_offsets[connection] = int(cmd[1])
     else:
         connection.sendall(b"+OK\r\n")
 
@@ -528,8 +538,32 @@ def handle_wait(connection, num_replicas, timeout):
         timeout = int(timeout) / 1000.0
     except ValueError:
         return connection.sendall(b"-ERR invalid WAIT arguments\r\n")
-    replica_count = len(replicas)
-    connection.sendall(f":{replica_count}\r\n".encode())
+    
+    global master_repl_offset
+    if master_repl_offset == 0:
+        return connection.sendall(f":{len(replicas)}\r\n".encode())
+
+    getack_command = ["REPLCONF", "GETACK", "*"]
+    propagate_to_replicas(getack_command)
+
+    master_repl_offset -= len(f"*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n".encode())
+    
+    start_time = time.time()
+    acked_replicas = 0
+
+    while True:
+        current_acks = sum(1 for offset in replica_offsets.values() if offset >= master_repl_offset)
+        if current_acks >= num_replicas:
+            acked_replicas = current_acks
+            break
+
+        if (time.time() - start_time) >= timeout:
+            acked_replicas = current_acks
+            break
+
+        threading.Event().wait(0.01)
+
+    connection.sendall(f":{acked_replicas}\r\n".encode())
 
 
 def execute_command(connection, command):
