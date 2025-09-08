@@ -523,7 +523,13 @@ def handle_replconf(connection, cmd):
 
 
 def handle_wait(connection, num_replicas, timeout):
-    connection.sendall(b":0\r\n")
+    try:
+        num_replicas = int(num_replicas)
+        timeout = int(timeout) / 1000.0
+    except ValueError:
+        return connection.sendall(b"-ERR invalid WAIT arguments\r\n")
+    replica_count = len(replicas)
+    connection.sendall(f":{replica_count}\r\n".encode())
 
 
 def execute_command(connection, command):
