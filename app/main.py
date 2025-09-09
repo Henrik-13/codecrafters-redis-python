@@ -596,8 +596,10 @@ def handle_keys(connection, pattern):
 
 
 def handle_subscribe(connection, channel):
+    if connection not in subscriptions:
+        subscriptions[connection] = set()
     if channel not in subscriptions[connection]:
-        subscriptions[connection].append(channel)
+        subscriptions[connection].add(channel)
     response = f"*3\r\n$9\r\nsubscribe\r\n${len(channel)}\r\n{channel}\r\n:{len(subscriptions[connection])}\r\n"
     return connection.sendall(response.encode())
 
