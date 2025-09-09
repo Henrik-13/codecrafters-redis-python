@@ -3,6 +3,8 @@ import threading
 import time
 import argparse
 
+from app.rdb_parser import RDBParser
+
 parser = argparse.ArgumentParser()
 
 dictionary = {}
@@ -581,6 +583,17 @@ def handle_config(connection, args):
             return connection.sendall(b"-ERR unknown CONFIG GET parameter\r\n")
 
 
+def handle_keys(connection, pattern):
+    if pattern == "*":
+        keys = list(dictionary.keys())
+        response = f"*{len(keys)}\r\n"
+        for key in keys:
+            response += f"${len(key)}\r\n{key}\r\n"
+        return connection.sendall(response.encode())
+    else:
+        return connection.sendall(b"*0\r\n")
+
+
 def execute_command(connection, command):
     cmd = command[0].upper() if command else None
 
@@ -632,6 +645,8 @@ def execute_command(connection, command):
         handle_wait(connection, command[1], command[2])
     elif cmd == "CONFIG" and len(command) >= 2:
         handle_config(connection, command[1:])
+    elif cmd == "KEYS" and len(command) == 2:
+        handle_keys(connection, command[1])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
@@ -796,7 +811,7 @@ def main(args):
     print("Logs from your program will appear here!")
     server_socket = socket.create_server(("localhost", int(args.port)), reuse_port=True)
 
-    global replica_of, master_connection_socket, dir, dbfilename
+    global replica_of, master_connection_socket, dir, dbfilename, dictionary
     if args.replicaof:
         replica_of = args.replicaof
         master_host, master_port = args.replicaof.split()
@@ -814,6 +829,12 @@ def main(args):
     
     if args.dbfilename:
         dbfilename = args.dbfilename
+
+    if dir and dbfilename:
+        rdb_path = f"{dir}/{dbfilename}"
+        rdb_parser = RDBParser(rdb_path)
+        dictionary = rdb_parser.parse()
+        print(f"Loaded {len(dictionary)} keys from RDB file")
 
     while True:
         connection, _ = server_socket.accept()
