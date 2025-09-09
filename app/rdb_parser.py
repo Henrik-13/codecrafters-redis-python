@@ -3,7 +3,7 @@ import time
 class RDBParser:
     HEADER_MAGIC = b"\x52\x45\x44\x49\x53\x30\x30\x31\x31"  # "REDIS0001"
     META_START = 0xFA
-    REDIS_VERSION = b"\x09\x72\x65\x64\x69\x73\x2D\x76\x65\x72"
+    # REDIS_VERSION = b"\x09\x72\x65\x64\x69\x73\x2D\x76\x65\x72"
     EOF = 0xFF
     DB_START = 0xFE
     HASH_START = 0xFB
@@ -66,12 +66,8 @@ class RDBParser:
         
         # Check header
         magic = self._read(len(self.HEADER_MAGIC))
-        # version = self._read(4)
-        # version = self._read(len(self.REDIS_VERSION))
         if magic != self.HEADER_MAGIC:
             raise ValueError("Invalid RDB file: incorrect header magic")
-        # if version != self.REDIS_VERSION:
-        #     raise ValueError("Invalid RDB file: incorrect Redis version")
         
         data = {}
         expiry_ms = None
