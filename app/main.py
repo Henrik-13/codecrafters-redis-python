@@ -11,6 +11,7 @@ dictionary = {}
 list_dict = {}
 streams = {}
 connections = {}
+subscriptions = {}
 
 replica_of = None
 replicas = []
@@ -595,7 +596,9 @@ def handle_keys(connection, pattern):
 
 
 def handle_subscribe(connection, channel):
-    response = f"*3\r\n$9\r\nsubscribe\r\n${len(channel)}\r\n{channel}\r\n:1\r\n"
+    if channel not in subscriptions[connection]:
+        subscriptions[connection].append(channel)
+    response = f"*3\r\n$9\r\nsubscribe\r\n${len(channel)}\r\n{channel}\r\n:{len(subscriptions[connection])}\r\n"
     return connection.sendall(response.encode())
 
 def execute_command(connection, command):
