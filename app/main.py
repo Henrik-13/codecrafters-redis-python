@@ -8,13 +8,19 @@ from app.rdb_parser import RDBParser
 parser = argparse.ArgumentParser()
 
 dictionary = {}
+dictionary_lock = threading.Lock()
 list_dict = {}
+list_dict_lock = threading.Lock()
 streams = {}
+streams_lock = threading.Lock()
 connections = {}
+connections_lock = threading.Lock()
 subscriptions = {}
+subscriptions_lock = threading.Lock()
 
 replica_of = None
 replicas = []
+replicas_lock = threading.Lock()
 replica_offsets = {} # Maps replica socket to its last known offset
 master_repl_offset = 0
 replica_offset = 0
@@ -125,6 +131,8 @@ def parse_commands(buffer):
 def handle_ping(connection):
     if connection == master_connection_socket:
         return None
+    elif connection in subscriptions and subscriptions[connection]:
+        return connection.sendall(b"*2\r\n$4\r\npong\r\n$0\r\n\r\n")
     return connection.sendall(b"+PONG\r\n")
 
 
@@ -136,13 +144,15 @@ def handle_echo(connection, message):
 def handle_set(connection, args):
     key = args[0]
     value = args[1]
-    dictionary[key] = value
-    if len(args) > 2 and args[2].upper() == "PX":
-        try:
-            expire_time = int(args[3]) / 1000.0
-            threading.Timer(expire_time, lambda: dictionary.pop(key, None)).start()
-        except (ValueError, IndexError):
-            return connection.sendall(b"-ERR invalid PX value\r\n")
+    with dictionary_lock:
+        dictionary[key] = value
+        if len(args) > 2 and args[2].upper() == "PX":
+            try:
+                expire_time = int(args[3]) / 1000.0
+                # The timer callback also needs to acquire the lock
+                threading.Timer(expire_time, lambda: (dictionary_lock.acquire(), dictionary.pop(key, None), dictionary_lock.release())).start()
+            except (ValueError, IndexError):
+                return connection.sendall(b"-ERR invalid PX value\r\n")
     
     if connection == master_connection_socket:
         return None
@@ -153,39 +163,42 @@ def handle_set(connection, args):
 
 
 def handle_get(connection, key):
-    if key in dictionary:
-        value = dictionary[key]
-        response = f"${len(value)}\r\n{value}\r\n"
-        return connection.sendall(response.encode())
-    else:
-        return connection.sendall(b"$-1\r\n")
+    with dictionary_lock:
+        if key in dictionary:
+            value = dictionary[key]
+            response = f"${len(value)}\r\n{value}\r\n"
+            return connection.sendall(response.encode())
+        else:
+            return connection.sendall(b"$-1\r\n")
 
 
 def handle_rpush(connection, key, values):
-    if key not in list_dict:
-        list_dict[key] = []
-    for value in values:
-        list_dict[key].append(value)
-    response = f":{len(list_dict[key])}\r\n"
+    with list_dict_lock:
+        if key not in list_dict:
+            list_dict[key] = []
+        for value in values:
+            list_dict[key].append(value)
+        response = f":{len(list_dict[key])}\r\n"
     return connection.sendall(response.encode())
 
 
 def handle_lrange(connection, key, start, end):
     start = int(start)
     end = int(end)
-    if key not in list_dict or start >= len(list_dict[key]):
-        return connection.sendall("*0\r\n".encode())
-    lst = list_dict[key]
+    with list_dict_lock:
+        if key not in list_dict or start >= len(list_dict[key]):
+            return connection.sendall("*0\r\n".encode())
+        lst = list_dict[key]
 
-    if start < 0:
-        start = len(lst) + start
-    if end < 0:
-        end = len(lst) + end
+        if start < 0:
+            start = len(lst) + start
+        if end < 0:
+            end = len(lst) + end
 
-    start = max(0, min(start, len(lst)))
-    end = max(-1, min(end, len(lst) - 1))
+        start = max(0, min(start, len(lst)))
+        end = max(-1, min(end, len(lst) - 1))
 
-    selected_items = lst[start:end + 1]
+        selected_items = lst[start:end + 1]
     response = f"*{len(selected_items)}\r\n"
 
     for value in selected_items:
@@ -195,16 +208,18 @@ def handle_lrange(connection, key, start, end):
 
 
 def handle_lpush(connection, key, values):
-    if key not in list_dict:
-        list_dict[key] = []
-    for value in values:
-        list_dict[key].insert(0, value)
-    response = f":{len(list_dict[key])}\r\n"
+    with list_dict_lock:
+        if key not in list_dict:
+            list_dict[key] = []
+        for value in values:
+            list_dict[key].insert(0, value)
+        response = f":{len(list_dict[key])}\r\n"
     return connection.sendall(response.encode())
 
 
 def handle_llen(connection, key):
-    length = len(list_dict.get(key, []))
+    with list_dict_lock:
+        length = len(list_dict.get(key, []))
     response = f":{length}\r\n"
     return connection.sendall(response.encode())
 
@@ -212,15 +227,16 @@ def handle_llen(connection, key):
 def handle_lpop(connection, args):
     key = args[0]
     count = 1
-    if key not in list_dict or not list_dict[key]:
-        return connection.sendall("$-1\r\n".encode())
-    if len(args) > 1:
-        count = int(args[1])
+    with list_dict_lock:
+        if key not in list_dict or not list_dict[key]:
+            return connection.sendall("$-1\r\n".encode())
+        if len(args) > 1:
+            count = int(args[1])
 
-    deleted_items = []
-    while count > 0 and list_dict[key]:
-        deleted_items.append(list_dict[key].pop(0))
-        count -= 1
+        deleted_items = []
+        while count > 0 and list_dict[key]:
+            deleted_items.append(list_dict[key].pop(0))
+            count -= 1
 
     if not deleted_items:
         response = "$-1\r\n"
@@ -239,10 +255,11 @@ def handle_blpop(connection, key, timeout):
     start_time = time.time() if timeout > 0 else None
 
     while True:
-        if key in list_dict and list_dict[key]:
-            value = list_dict[key].pop(0)
-            response = f"*2\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n"
-            return connection.sendall(response.encode())
+        with list_dict_lock:
+            if key in list_dict and list_dict[key]:
+                value = list_dict[key].pop(0)
+                response = f"*2\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n"
+                return connection.sendall(response.encode())
 
         if timeout == 0:
             threading.Event().wait(0.1)
@@ -253,15 +270,17 @@ def handle_blpop(connection, key, timeout):
 
 
 def handle_type(connection, key):
-    if key in dictionary:
-        response = "+string\r\n"
-    elif key in list_dict:
-        response = "+list\r\n"
-    elif key in streams:
-        response = "+stream\r\n"
-    else:
-        response = "+none\r\n"
-    return connection.sendall(response.encode())
+    with dictionary_lock:
+        if key in dictionary:
+            return connection.sendall(b"+string\r\n")
+    with list_dict_lock:
+        if key in list_dict:
+            return connection.sendall(b"+list\r\n")
+    with streams_lock:
+        if key in streams:
+            return connection.sendall(b"+stream\r\n")
+    
+    return connection.sendall(b"+none\r\n")
 
 
 def parse_stream_id(id):
@@ -279,9 +298,10 @@ def parse_stream_id(id):
 
 
 def validate_stream_id(stream_key, id):
-    if stream_key not in streams or not streams[stream_key]:
-        return True
-    last_entry = streams[stream_key][-1]
+    with streams_lock:
+        if stream_key not in streams or not streams[stream_key]:
+            return True
+        last_entry = streams[stream_key][-1]
     last_id = last_entry["id"]
     new_ts, new_seq = parse_stream_id(id)
     last_ts, last_seq = parse_stream_id(last_id)
@@ -298,13 +318,14 @@ def generate_stream_id():
 
 
 def generate_next_stream_id(key, ts):
-    if key in streams and streams[key]:
-        last_entry = streams[key][-1]
-        last_id = last_entry["id"]
-        last_ts, last_seq = parse_stream_id(last_id)
-        seq = last_seq + 1 if ts == last_ts else 0
-    else:
-        seq = 1 if ts == 0 else 0
+    with streams_lock:
+        if key in streams and streams[key]:
+            last_entry = streams[key][-1]
+            last_id = last_entry["id"]
+            last_ts, last_seq = parse_stream_id(last_id)
+            seq = last_seq + 1 if ts == last_ts else 0
+        else:
+            seq = 1 if ts == 0 else 0
     return f"{ts}-{seq}"
 
 
@@ -323,13 +344,14 @@ def handle_xadd(connection, key, id, args):
             if not validate_stream_id(key, id):
                 return connection.sendall(
                     b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n")
-    if key not in streams:
-        streams[key] = []
-    entry = {"id": id, "fields": {}}
-    for i in range(0, len(args), 2):
-        if i + 1 < len(args):
-            entry["fields"][args[i]] = args[i + 1]
-    streams[key].append(entry)
+    with streams_lock:
+        if key not in streams:
+            streams[key] = []
+        entry = {"id": id, "fields": {}}
+        for i in range(0, len(args), 2):
+            if i + 1 < len(args):
+                entry["fields"][args[i]] = args[i + 1]
+        streams[key].append(entry)
     response = f"${len(id)}\r\n{id}\r\n"
     return connection.sendall(response.encode())
 
@@ -351,20 +373,21 @@ def compare_stream_ids(id1, id2):
 
 
 def handle_xrange(connection, key, start, end):
-    if key not in streams or not streams[key]:
-        return connection.sendall(b"*0\r\n")
+    with streams_lock:
+        if key not in streams or not streams[key]:
+            return connection.sendall(b"*0\r\n")
 
-    if start == "-":
-        start = streams[key][0]["id"]
+        if start == "-":
+            start = streams[key][0]["id"]
 
-    if end == "+":
-        end = streams[key][-1]["id"]
+        if end == "+":
+            end = streams[key][-1]["id"]
 
-    filtered_entries = []
-    for entry in streams[key]:
-        entry_id = entry["id"]
-        if compare_stream_ids(start, entry_id) <= 0 and compare_stream_ids(entry_id, end) <= 0:
-            filtered_entries.append(entry)
+        filtered_entries = []
+        for entry in streams[key]:
+            entry_id = entry["id"]
+            if compare_stream_ids(start, entry_id) <= 0 and compare_stream_ids(entry_id, end) <= 0:
+                filtered_entries.append(entry)
 
     if not filtered_entries:
         return connection.sendall(b"*0\r\n")
@@ -392,11 +415,12 @@ def handle_xread(connection, args, block=None):
         id = args[i + num_streams]
 
         if id == "$":
-            if key in streams and streams[key]:
-                last_entry = streams[key][-1]
-                id = last_entry["id"]
-            else:
-                id = "0-0"
+            with streams_lock:
+                if key in streams and streams[key]:
+                    last_entry = streams[key][-1]
+                    id = last_entry["id"]
+                else:
+                    id = "0-0"
         processed_ids.append(id)
 
     while True:
@@ -406,14 +430,15 @@ def handle_xread(connection, args, block=None):
         for i in range(num_streams):
             key = args[i]
             id = processed_ids[i]
-            if key not in streams or not streams[key]:
-                continue
+            with streams_lock:
+                if key not in streams or not streams[key]:
+                    continue
 
-            filtered_entries = []
-            for entry in streams[key]:
-                entry_id = entry["id"]
-                if compare_stream_ids(entry_id, id) > 0:
-                    filtered_entries.append(entry)
+                filtered_entries = []
+                for entry in streams[key]:
+                    entry_id = entry["id"]
+                    if compare_stream_ids(entry_id, id) > 0:
+                        filtered_entries.append(entry)
 
             if filtered_entries:
                 has_results = True
@@ -441,51 +466,56 @@ def handle_xread(connection, args, block=None):
 
 
 def handle_incr(connection, key):
-    if key not in dictionary:
-        dictionary[key] = "1"
-    else:
-        try:
-            dictionary[key] = int(dictionary[key]) + 1
-        except ValueError:
-            return connection.sendall(b"-ERR value is not an integer or out of range\r\n")
+    with dictionary_lock:
+        if key not in dictionary:
+            dictionary[key] = "1"
+        else:
+            try:
+                dictionary[key] = str(int(dictionary[key]) + 1)
+            except ValueError:
+                return connection.sendall(b"-ERR value is not an integer or out of range\r\n")
 
-    dictionary[key] = str(dictionary[key])
-    return connection.sendall(f":{dictionary[key]}\r\n".encode())
+        return connection.sendall(f":{dictionary[key]}\r\n".encode())
 
 
 def handle_multi(connection):
     conn_id = id(connection)
-    connections[conn_id] = {'in_transaction': True, 'commands': []}
+    with connections_lock:
+        connections[conn_id] = {'in_transaction': True, 'commands': []}
     return connection.sendall(b"+OK\r\n")
 
 
 def handle_exec(connection):
     conn_id = id(connection)
-    if conn_id not in connections or not connections[conn_id].get('in_transaction'):
-        return connection.sendall(b"-ERR EXEC without MULTI\r\n")
+    with connections_lock:
+        if conn_id not in connections or not connections[conn_id].get('in_transaction'):
+            return connection.sendall(b"-ERR EXEC without MULTI\r\n")
 
-    commands = connections[conn_id]['commands']
+        commands = connections[conn_id]['commands']
+        del connections[conn_id]
+    
     connection.sendall(f"*{len(commands)}\r\n".encode())
     for command in commands:
         execute_command(connection, command)
-    del connections[conn_id]
     return None
 
 
 def queue_command(connection, command):
     conn_id = id(connection)
-    if conn_id in connections and connections[conn_id].get('in_transaction'):
-        connections[conn_id]['commands'].append(command)
-        connection.sendall(b"+QUEUED\r\n")
-        return True
+    with connections_lock:
+        if conn_id in connections and connections[conn_id].get('in_transaction'):
+            connections[conn_id]['commands'].append(command)
+            connection.sendall(b"+QUEUED\r\n")
+            return True
     return False
 
 
 def handle_discard(connection):
     conn_id = id(connection)
-    if conn_id not in connections or not connections[conn_id].get('in_transaction'):
-        return connection.sendall(b"-ERR DISCARD without MULTI\r\n")
-    del connections[conn_id]
+    with connections_lock:
+        if conn_id not in connections or not connections[conn_id].get('in_transaction'):
+            return connection.sendall(b"-ERR DISCARD without MULTI\r\n")
+        del connections[conn_id]
     return connection.sendall(b"+OK\r\n")
 
 
@@ -506,7 +536,8 @@ def handle_psync(connection, args):
     rdb_file_encoded = bytes.fromhex(empty_rdb_file)
     connection.sendall(f"${len(rdb_file_encoded)}\r\n".encode() + rdb_file_encoded)
 
-    replicas.append(connection)
+    with replicas_lock:
+        replicas.append(connection)
 
 
 
@@ -519,13 +550,18 @@ def propagate_to_replicas(command_array):
     encoded_bytes = encoded_command.encode()
     master_repl_offset += len(encoded_bytes)
 
-    for replica in replicas[:]:
+    with replicas_lock:
+        current_replicas = list(replicas)
+
+    for replica in current_replicas:
         try:
-            replica.sendall(encoded_command.encode())
+            replica.sendall(encoded_bytes)
         except Exception:
-            replicas.remove(replica)
-            if replica in replica_offsets:
-                del replica_offsets[replica]
+            with replicas_lock:
+                if replica in replicas:
+                    replicas.remove(replica)
+                if replica in replica_offsets:
+                    del replica_offsets[replica]
 
 
 def handle_replconf(connection, cmd):
@@ -533,7 +569,8 @@ def handle_replconf(connection, cmd):
         offset_str = str(replica_offset)
         connection.sendall(f"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${len(offset_str)}\r\n{offset_str}\r\n".encode())
     elif len(cmd) >= 2 and cmd[0].upper() == "ACK":
-        replica_offsets[connection] = int(cmd[1])
+        with replicas_lock:
+            replica_offsets[connection] = int(cmd[1])
     else:
         connection.sendall(b"+OK\r\n")
 
@@ -558,7 +595,8 @@ def handle_wait(connection, num_replicas, timeout):
     acked_replicas = 0
 
     while True:
-        current_acks = sum(1 for offset in replica_offsets.values() if offset >= master_repl_offset)
+        with replicas_lock:
+            current_acks = sum(1 for offset in replica_offsets.values() if offset >= master_repl_offset)
         if current_acks >= num_replicas:
             acked_replicas = current_acks
             break
@@ -586,7 +624,8 @@ def handle_config(connection, args):
 
 def handle_keys(connection, pattern):
     if pattern == "*":
-        keys = list(dictionary.keys())
+        with dictionary_lock:
+            keys = list(dictionary.keys())
         response = f"*{len(keys)}\r\n"
         for key in keys:
             response += f"${len(key)}\r\n{key}\r\n"
@@ -596,10 +635,11 @@ def handle_keys(connection, pattern):
 
 
 def handle_subscribe(connection, channel):
-    if connection not in subscriptions:
-        subscriptions[connection] = set()
-    if channel not in subscriptions[connection]:
-        subscriptions[connection].add(channel)
+    with subscriptions_lock:
+        if connection not in subscriptions:
+            subscriptions[connection] = set()
+        if channel not in subscriptions[connection]:
+            subscriptions[connection].add(channel)
     response = f"*3\r\n$9\r\nsubscribe\r\n${len(channel)}\r\n{channel}\r\n:{len(subscriptions[connection])}\r\n"
     return connection.sendall(response.encode())
 
@@ -622,14 +662,17 @@ def enter_subscription_mode(connection):
                     handle_subscribe(connection, command[1])
                 elif cmd == "UNSUBSCRIBE" and len(command) == 2:
                     channel = command[1]
-                    if connection in subscriptions and channel in subscriptions[connection]:
-                        subscriptions[connection].remove(channel)
-                        response = f"*3\r\n$11\r\nunsubscribe\r\n${len(channel)}\r\n{channel}\r\n:{len(subscriptions[connection])}\r\n"
-                        connection.sendall(response.encode())
-                    if not subscriptions[connection]:
-                        del subscriptions[connection]
-                        return
-                elif cmd == "PING" or cmd == "PSUBSCRIBE" or cmd == "PUNSUBSCRIBE" or cmd == "QUIT":
+                    with subscriptions_lock:
+                        if connection in subscriptions and channel in subscriptions[connection]:
+                            subscriptions[connection].remove(channel)
+                            response = f"*3\r\n$11\r\nunsubscribe\r\n${len(channel)}\r\n{channel}\r\n:{len(subscriptions[connection])}\r\n"
+                            connection.sendall(response.encode())
+                        if not subscriptions[connection]:
+                            del subscriptions[connection]
+                            return
+                elif cmd == "PING":
+                    handle_ping(connection)
+                elif cmd == "PSUBSCRIBE" or cmd == "PUNSUBSCRIBE" or cmd == "QUIT":
                     break
                 else:
                     response = f"-ERR Can't execute '{cmd.lower()}' in subscribed mode\r\n"
@@ -637,8 +680,9 @@ def enter_subscription_mode(connection):
 
         except Exception:
             break
-    if connection in subscriptions:
-        del subscriptions[connection]
+    with subscriptions_lock:
+        if connection in subscriptions:
+            del subscriptions[connection]
     if connection in replicas:
         replicas.remove(connection)
     if connection in replica_offsets:
