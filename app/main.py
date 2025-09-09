@@ -22,7 +22,9 @@ replica_of = None
 replicas = []
 replicas_lock = threading.Lock()
 replica_offsets = {} # Maps replica socket to its last known offset
+replica_offsets_lock = threading.Lock()
 master_repl_offset = 0
+master_repl_offset_lock = threading.Lock()
 replica_offset = 0
 write_commands = {"SET", "DEL", "INCR", "DECR", "RPUSH", "LPUSH", "LPOP", "XADD"}
 
@@ -131,7 +133,9 @@ def parse_commands(buffer):
 def handle_ping(connection):
     if connection == master_connection_socket:
         return None
-    elif connection in subscriptions and subscriptions[connection]:
+    with subscriptions_lock:
+        is_subscribed = connection in subscriptions and subscriptions[connection]
+    if is_subscribed:
         return connection.sendall(b"*2\r\n$4\r\npong\r\n$0\r\n\r\n")
     return connection.sendall(b"+PONG\r\n")
 
@@ -157,7 +161,9 @@ def handle_set(connection, args):
     if connection == master_connection_socket:
         return None
 
-    if connection not in replicas:
+    with replicas_lock:
+        is_replica = connection in replicas
+    if not is_replica:
         return connection.sendall(b"+OK\r\n")
     return None
 
@@ -548,7 +554,8 @@ def propagate_to_replicas(command_array):
         encoded_command += f"${len(arg)}\r\n{arg}\r\n"
 
     encoded_bytes = encoded_command.encode()
-    master_repl_offset += len(encoded_bytes)
+    with master_repl_offset_lock:
+        master_repl_offset += len(encoded_bytes)
 
     with replicas_lock:
         current_replicas = list(replicas)
@@ -560,6 +567,7 @@ def propagate_to_replicas(command_array):
             with replicas_lock:
                 if replica in replicas:
                     replicas.remove(replica)
+            with replica_offsets_lock:
                 if replica in replica_offsets:
                     del replica_offsets[replica]
 
@@ -569,7 +577,7 @@ def handle_replconf(connection, cmd):
         offset_str = str(replica_offset)
         connection.sendall(f"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${len(offset_str)}\r\n{offset_str}\r\n".encode())
     elif len(cmd) >= 2 and cmd[0].upper() == "ACK":
-        with replicas_lock:
+        with replica_offsets_lock:
             replica_offsets[connection] = int(cmd[1])
     else:
         connection.sendall(b"+OK\r\n")
@@ -582,27 +590,30 @@ def handle_wait(connection, num_replicas, timeout):
     except ValueError:
         return connection.sendall(b"-ERR invalid WAIT arguments\r\n")
     
-    global master_repl_offset
-    if master_repl_offset == 0:
-        return connection.sendall(f":{len(replicas)}\r\n".encode())
+    with master_repl_offset_lock:
+        current_master_offset = master_repl_offset
+    
+    if current_master_offset == 0:
+        with replicas_lock:
+            num_connected_replicas = len(replicas)
+        return connection.sendall(f":{num_connected_replicas}\r\n".encode())
 
     getack_command = ["REPLCONF", "GETACK", "*"]
     propagate_to_replicas(getack_command)
-
-    master_repl_offset -= len(f"*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n".encode())
     
     start_time = time.time()
     acked_replicas = 0
 
     while True:
-        with replicas_lock:
-            current_acks = sum(1 for offset in replica_offsets.values() if offset >= master_repl_offset)
+        with replica_offsets_lock:
+            current_acks = sum(1 for offset in replica_offsets.values() if offset >= current_master_offset)
         if current_acks >= num_replicas:
             acked_replicas = current_acks
             break
 
         if (time.time() - start_time) >= timeout:
-            acked_replicas = current_acks
+            with replica_offsets_lock:
+                acked_replicas = sum(1 for offset in replica_offsets.values() if offset >= current_master_offset)
             break
 
         threading.Event().wait(0.01)
@@ -683,11 +694,29 @@ def enter_subscription_mode(connection):
     with subscriptions_lock:
         if connection in subscriptions:
             del subscriptions[connection]
-    if connection in replicas:
-        replicas.remove(connection)
-    if connection in replica_offsets:
-        del replica_offsets[connection]
+    with replicas_lock:
+        if connection in replicas:
+            replicas.remove(connection)
+    with replica_offsets_lock:
+        if connection in replica_offsets:
+            del replica_offsets[connection]
     connection.close()
+
+
+def handle_publish(connection, channel, message):
+    delivered_count = 0
+    channel_count = 0
+    with subscriptions_lock:
+        for conn, channels in subscriptions.items():
+            if channel in channels:
+                channel_count += 1
+                # response = f"*3\r\n$7\r\nmessage\r\n${len(channel)}\r\n{channel}\r\n${len(message)}\r\n{message}\r\n"
+                # try:
+                #     conn.sendall(response.encode())
+                #     delivered_count += 1
+                # except Exception:
+                #     pass  # Ignore failures to send
+    return connection.sendall(f":{channel_count}\r\n".encode())
 
 
 def execute_command(connection, command):
@@ -746,6 +775,8 @@ def execute_command(connection, command):
     elif cmd == "SUBSCRIBE" and len(command) == 2:
         handle_subscribe(connection, command[1])
         enter_subscription_mode(connection)
+    elif cmd == "PUBLISH" and len(command) == 3:
+        handle_publish(connection, command[1], command[2])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
@@ -816,10 +847,15 @@ def send_response(connection, initial_buffer=b""):
         print(f"Error in send_response: {e}")
     finally:
         conn_id = id(connection)
-        if conn_id in connections:
-            del connections[conn_id]
-        if connection in replicas:
-            replicas.remove(connection)
+        with connections_lock:
+            if conn_id in connections:
+                del connections[conn_id]
+        with replicas_lock:
+            if connection in replicas:
+                replicas.remove(connection)
+        with replica_offsets_lock:
+            if connection in replica_offsets:
+                del replica_offsets[connection]
         connection.close()
 
 
