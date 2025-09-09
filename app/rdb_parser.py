@@ -39,9 +39,7 @@ class RDBParser:
             second_byte = self._read_byte()
             return ((first_byte & 0x3F) << 8) | second_byte
         elif type == 0b10:
-            # second_byte = self._read(2)
             return int.from_bytes(self._read(4), 'big')
-            # return ((first_byte & 0x3F) << 16) | (second_byte[0] << 8) | second_byte[1]
         else:
             return first_byte
         
