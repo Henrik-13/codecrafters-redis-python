@@ -594,6 +594,10 @@ def handle_keys(connection, pattern):
         return connection.sendall(b"*0\r\n")
 
 
+def handle_subscribe(connection, channel):
+    response = f"*3\r\n$9\r\nsubscribe\r\n${len(channel)}\r\n{channel}\r\n:1\r\n"
+    return connection.sendall(response.encode())
+
 def execute_command(connection, command):
     cmd = command[0].upper() if command else None
 
@@ -647,6 +651,8 @@ def execute_command(connection, command):
         handle_config(connection, command[1:])
     elif cmd == "KEYS" and len(command) == 2:
         handle_keys(connection, command[1])
+    elif cmd == "SUBSCRIBE" and len(command) == 2:
+        handle_subscribe(connection, command[1])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
