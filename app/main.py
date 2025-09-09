@@ -603,6 +603,49 @@ def handle_subscribe(connection, channel):
     response = f"*3\r\n$9\r\nsubscribe\r\n${len(channel)}\r\n{channel}\r\n:{len(subscriptions[connection])}\r\n"
     return connection.sendall(response.encode())
 
+
+def enter_subscription_mode(connection):
+    while True:
+        try:
+            data = connection.recv(1024)
+            if not data:
+                break  # Connection closed
+            # Ignore any commands while in subscription mode
+            commands_with_bytes, _, _ = parse_commands(data)
+
+            # If no full commands could be parsed, we need more data
+            if not commands_with_bytes:
+                continue
+            for command, _ in commands_with_bytes:
+                cmd = command[0].upper() if command else None
+                if cmd == "SUBSCRIBE" and len(command) == 2:
+                    handle_subscribe(connection, command[1])
+                elif cmd == "UNSUBSCRIBE" and len(command) == 2:
+                    channel = command[1]
+                    if connection in subscriptions and channel in subscriptions[connection]:
+                        subscriptions[connection].remove(channel)
+                        response = f"*3\r\n$11\r\nunsubscribe\r\n${len(channel)}\r\n{channel}\r\n:{len(subscriptions[connection])}\r\n"
+                        connection.sendall(response.encode())
+                    if not subscriptions[connection]:
+                        del subscriptions[connection]
+                        return
+                elif cmd == "PING" or cmd == "PSUBSCRIBE" or cmd == "PUNSUBSCRIBE" or cmd == "QUIT":
+                    break
+                else:
+                    response = f"-ERR Can't execute '{cmd.lower()}' in subscribed mode\r\n"
+                    connection.sendall(response.encode())
+
+        except Exception:
+            break
+    if connection in subscriptions:
+        del subscriptions[connection]
+    if connection in replicas:
+        replicas.remove(connection)
+    if connection in replica_offsets:
+        del replica_offsets[connection]
+    connection.close()
+
+
 def execute_command(connection, command):
     cmd = command[0].upper() if command else None
 
@@ -658,6 +701,7 @@ def execute_command(connection, command):
         handle_keys(connection, command[1])
     elif cmd == "SUBSCRIBE" and len(command) == 2:
         handle_subscribe(connection, command[1])
+        enter_subscription_mode(connection)
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
