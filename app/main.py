@@ -684,7 +684,7 @@ def enter_subscription_mode(connection):
                 elif cmd == "PING":
                     handle_ping(connection)
                 elif cmd == "PSUBSCRIBE" or cmd == "PUNSUBSCRIBE" or cmd == "QUIT":
-                    break
+                    raise NotImplementedError
                 else:
                     response = f"-ERR Can't execute '{cmd.lower()}' in subscribed mode\r\n"
                     connection.sendall(response.encode())
@@ -704,19 +704,17 @@ def enter_subscription_mode(connection):
 
 
 def handle_publish(connection, channel, message):
-    delivered_count = 0
-    channel_count = 0
+    subscriber_count = 0
     with subscriptions_lock:
         for conn, channels in subscriptions.items():
             if channel in channels:
-                channel_count += 1
-                # response = f"*3\r\n$7\r\nmessage\r\n${len(channel)}\r\n{channel}\r\n${len(message)}\r\n{message}\r\n"
-                # try:
-                #     conn.sendall(response.encode())
-                #     delivered_count += 1
-                # except Exception:
-                #     pass  # Ignore failures to send
-    return connection.sendall(f":{channel_count}\r\n".encode())
+                response = f"*3\r\n$7\r\nmessage\r\n${len(channel)}\r\n{channel}\r\n${len(message)}\r\n{message}\r\n"
+                try:
+                    conn.sendall(response.encode())
+                    subscriber_count += 1
+                except Exception:
+                    pass  # Ignore failures to send
+    return connection.sendall(f":{subscriber_count}\r\n".encode())
 
 
 def execute_command(connection, command):
