@@ -17,6 +17,8 @@ connections = {}
 connections_lock = threading.Lock()
 subscriptions = {}
 subscriptions_lock = threading.Lock()
+sorted_sets = {}
+sorted_sets_lock = threading.Lock()
 
 replica_of = None
 replicas = []
@@ -683,8 +685,10 @@ def enter_subscription_mode(connection):
                             return
                 elif cmd == "PING":
                     handle_ping(connection)
-                elif cmd == "PSUBSCRIBE" or cmd == "PUNSUBSCRIBE" or cmd == "QUIT":
+                elif cmd == "PSUBSCRIBE" or cmd == "PUNSUBSCRIBE":
                     raise NotImplementedError
+                elif cmd == "QUIT":
+                    return
                 else:
                     response = f"-ERR Can't execute '{cmd.lower()}' in subscribed mode\r\n"
                     connection.sendall(response.encode())
@@ -715,6 +719,29 @@ def handle_publish(connection, channel, message):
                 except Exception:
                     pass  # Ignore failures to send
     return connection.sendall(f":{subscriber_count}\r\n".encode())
+
+
+def handle_zadd(connection, key, args):
+    if len(args) % 2 != 0:
+        return connection.sendall(b"-ERR wrong number of arguments for 'ZADD' command\r\n")
+    
+    added_count = 0
+    with sorted_sets_lock:
+        if key not in sorted_sets:
+            sorted_sets[key] = {}
+        zset = sorted_sets[key]
+        
+        for i in range(0, len(args), 2):
+            try:
+                score = float(args[i])
+                member = args[i + 1]
+                if member not in zset:
+                    added_count += 1
+                zset[member] = score
+            except ValueError:
+                return connection.sendall(b"-ERR score is not a valid float\r\n")
+    
+    return connection.sendall(f":{added_count}\r\n".encode())
 
 
 def execute_command(connection, command):
@@ -775,6 +802,8 @@ def execute_command(connection, command):
         enter_subscription_mode(connection)
     elif cmd == "PUBLISH" and len(command) == 3:
         handle_publish(connection, command[1], command[2])
+    elif cmd == "ZADD" and len(command) >= 4:
+        handle_zadd(connection, command[1], command[2:])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
