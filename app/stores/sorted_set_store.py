@@ -100,6 +100,23 @@ class SortedSetStore:
             zset = self.data[key]
             return zset.scores.get(member, None)
         
+    def zrem(self, key, member):
+        with self.lock:
+            if key not in self.data:
+                return 0
+            zset = self.data[key]
+            if member not in zset.scores:
+                return 0
+            
+            score = zset.scores[member]
+            entry = (score, member)
+            index = bisect.bisect_left(zset.members, entry)
+            if index < len(zset.members) and zset.members[index] == entry:
+                zset.members.pop(index)
+                del zset.scores[member]
+                return 1
+            return 0
+        
     def exists(self, key):
         with self.lock:
             return key in self.data

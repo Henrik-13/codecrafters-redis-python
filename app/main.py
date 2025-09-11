@@ -596,6 +596,10 @@ def handle_zscore(connection, key, member):
         return connection.sendall(b"$-1\r\n")    
 
 
+def handle_zrem(connection, key, member):
+    removed_count = sorted_set_store.zrem(key, member)
+    return connection.sendall(f":{removed_count}\r\n".encode())
+
 
 def execute_command(connection, command):
     cmd = command[0].upper() if command else None
@@ -665,6 +669,8 @@ def execute_command(connection, command):
         handle_zcard(connection, command[1])
     elif cmd == "ZSCORE" and len(command) == 3:
         handle_zscore(connection, command[1], command[2])
+    elif cmd == "ZREM" and len(command) == 3:
+        handle_zrem(connection, command[1], command[2])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
