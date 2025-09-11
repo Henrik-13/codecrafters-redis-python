@@ -595,7 +595,7 @@ def handle_zrem(connection, key, member):
     return connection.sendall(f":{removed_count}\r\n".encode())
 
 
-def handle_geoadd(connection, key, longitude, latitude, member):
+def handle_geoadd(connection, key, longitude, latitude, location):
     try:
         longitude = float(longitude)
         latitude = float(latitude)
@@ -603,7 +603,11 @@ def handle_geoadd(connection, key, longitude, latitude, member):
             raise ValueError
     except ValueError:
         return connection.sendall(f"-ERR invalid longitude, latitude pair {longitude}, {latitude}\r\n".encode())
-    connection.sendall(b":1\r\n")
+    
+    score = 0.0
+    added_count = sorted_set_store.zadd(key, [str(score), location])
+
+    connection.sendall(f":{added_count}\r\n".encode())
 
 
 def execute_command(connection, command):
