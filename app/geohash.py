@@ -38,6 +38,7 @@ def spread_int32_to_int64(v: int) -> int:
 
     return v
 
+
 def decode(geo_code: int) -> (float, float):
     """
     decode converts geo code(WGS84) to tuple of (latitude, longitude)
