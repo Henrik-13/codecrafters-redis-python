@@ -8,7 +8,7 @@ from app.stores.list_store import ListStore
 from app.stores.stream_store import StreamStore
 from app.stores.string_store import StringStore
 from app.stores.sorted_set_store import SortedSetStore
-from app.geohash import GeoHash
+from app.geohash import encode
 
 parser = argparse.ArgumentParser()
 
@@ -605,8 +605,7 @@ def handle_geoadd(connection, key, longitude, latitude, location):
     except ValueError:
         return connection.sendall(f"-ERR invalid longitude, latitude pair {longitude}, {latitude}\r\n".encode())
 
-    geo_hash = GeoHash(latitude, longitude)
-    score = geo_hash.encode()
+    score = encode(latitude, longitude)
     print(f"Adding GEO {location} with score {score} to key {key}")
     added_count = sorted_set_store.zadd(key, [str(score), location])
 
