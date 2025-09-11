@@ -93,6 +93,13 @@ class SortedSetStore:
             zset = self.data[key]
             return len(zset.members)
         
+    def zscore(self, key, member):
+        with self.lock:
+            if key not in self.data:
+                return None
+            zset = self.data[key]
+            return zset.scores.get(member, None)
+        
     def exists(self, key):
         with self.lock:
             return key in self.data

@@ -588,6 +588,15 @@ def handle_zcard(connection, key):
     return connection.sendall(f":{cardinality}\r\n".encode())
 
 
+def handle_zscore(connection, key, member):
+    score = sorted_set_store.zscore(key, member)
+    if score is not None:
+        return connection.sendall(f"${len(str(score))}\r\n{score}\r\n".encode())
+    else:
+        return connection.sendall(b"$-1\r\n")    
+
+
+
 def execute_command(connection, command):
     cmd = command[0].upper() if command else None
 
@@ -654,6 +663,8 @@ def execute_command(connection, command):
         handle_zrange(connection, command[1], command[2], command[3])
     elif cmd == "ZCARD" and len(command) == 2:
         handle_zcard(connection, command[1])
+    elif cmd == "ZSCORE" and len(command) == 3:
+        handle_zscore(connection, command[1], command[2])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
