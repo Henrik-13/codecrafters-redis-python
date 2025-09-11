@@ -607,6 +607,7 @@ def handle_geoadd(connection, key, longitude, latitude, location):
 
     geo_hash = GeoHash(latitude, longitude)
     score = geo_hash.encode()
+    print(f"Adding GEO {location} with score {score} to key {key}")
     added_count = sorted_set_store.zadd(key, [str(score), location])
 
     connection.sendall(f":{added_count}\r\n".encode())
