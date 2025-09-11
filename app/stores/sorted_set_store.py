@@ -37,7 +37,6 @@ class _SortedSet:
             return index
         return None
             
-            
 
 class SortedSetStore:
     def __init__(self):
@@ -69,6 +68,23 @@ class SortedSetStore:
                 return None
             zset = self.data[key]
             return zset.rank(member)
+        
+    def zrange(self, key, start, end):
+        with self.lock:
+            if key not in self.data:
+                return []
+            zset = self.data[key]
+            members = [member for score, member in zset.members]
+
+            if start < 0:
+                start = len(members) + start
+            if end < 0:
+                end = len(members) + end
+
+            start = max(0, min(start, len(members)))
+            end = max(-1, min(end, len(members) - 1))
+
+            return members[start:end + 1]
         
     def exists(self, key):
         with self.lock:

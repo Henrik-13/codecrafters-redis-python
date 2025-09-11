@@ -567,6 +567,20 @@ def handle_zrank(connection, key, member):
         return connection.sendall(f":{rank}\r\n".encode())
     else:
         return connection.sendall(b"$-1\r\n")
+    
+
+def handle_zrange(connection, key, start, end):
+    try:
+        start = int(start)
+        end = int(end)
+    except ValueError:
+        return connection.sendall(b"-ERR start or end is not an integer\r\n")
+
+    members = sorted_set_store.zrange(key, start, end)
+    response = f"*{len(members)}\r\n"
+    for member in members:
+        response += f"${len(member)}\r\n{member}\r\n"
+    return connection.sendall(response.encode())
 
 
 def execute_command(connection, command):
@@ -631,6 +645,8 @@ def execute_command(connection, command):
         handle_zadd(connection, command[1], command[2:])
     elif cmd == "ZRANK" and len(command) == 3:
         handle_zrank(connection, command[1], command[2])
+    elif cmd == "ZRANGE" and len(command) == 4:
+        handle_zrange(connection, command[1], command[2], command[3])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
