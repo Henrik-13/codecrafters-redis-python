@@ -1,6 +1,6 @@
 import bisect
 import threading
-import time
+from app.geohash import haversine, decode as decode_geohash
 
 class _SortedSet:
     def __init__(self):
@@ -120,3 +120,29 @@ class SortedSetStore:
     def exists(self, key):
         with self.lock:
             return key in self.data
+
+    def geosearch(self, key, center_lon, center_lat, radius, unit):
+        unit_conversions = {
+            'm': 1,
+            'km': 1000,
+            'ft': 0.3048,
+            'mi': 1609.34
+        }
+        if unit.lower() not in unit_conversions:
+            raise ValueError(f"unsupported unit provided. please use m, km, ft, mi")
+        
+        radius_in_meters = radius * unit_conversions[unit.lower()]
+        
+        matching_locations = []
+        with self.lock:
+            if key not in self.data:
+                return []
+
+            zset = self.data[key]
+            for member, score in zset.scores.items():
+                lon, lat = decode_geohash(int(score))
+                distance = haversine(center_lon, center_lat, lon, lat)
+                if distance <= radius_in_meters:
+                    matching_locations.append(member)
+        
+        return matching_locations

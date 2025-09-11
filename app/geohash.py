@@ -1,3 +1,5 @@
+from math import radians, sin, cos, sqrt, atan2
+
 MIN_LATITUDE = -85.05112878
 MAX_LATITUDE = 85.05112878
 MIN_LONGITUDE = -180
@@ -7,7 +9,7 @@ LATITUDE_RANGE = MAX_LATITUDE - MIN_LATITUDE
 LONGITUDE_RANGE = MAX_LONGITUDE - MIN_LONGITUDE
 
 
-def encode(latitude: float, longitude: float) -> int:
+def encode(longitude: float, latitude: float) -> int:
     # Normalize to the range 0-2^26
     normalized_latitude = 2**26 * (latitude - MIN_LATITUDE) / LATITUDE_RANGE
     normalized_longitude = 2**26 * (longitude - MIN_LONGITUDE) / LONGITUDE_RANGE
@@ -78,4 +80,22 @@ def convert_grid_numbers_to_coordinates(grid_latitude_number, grid_longitude_num
     # Calculate the center point of the grid cell
     latitude = (grid_latitude_min + grid_latitude_max) / 2
     longitude = (grid_longitude_min + grid_longitude_max) / 2
-    return (latitude, longitude)
+    return (longitude, latitude)
+
+
+def haversine(lon1, lat1, lon2, lat2):
+    R = 6372797.560856  # Radius of the Earth in meters
+
+    lat1_rad = radians(lat1)
+    lon1_rad = radians(lon1)
+    lat2_rad = radians(lat2)
+    lon2_rad = radians(lon2)
+
+    dlat = lat2_rad - lat1_rad
+    dlon = lon2_rad - lon1_rad
+
+    a = sin(dlat / 2)**2 + cos(lat1_rad) * cos(lat2_rad) * sin(dlon / 2)**2
+    c = 2 * atan2(sqrt(a), sqrt(1 - a))
+
+    distance = R * c
+    return distance

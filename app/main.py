@@ -1,4 +1,3 @@
-from cmath import asin
 import socket  # noqa: F401
 import threading
 import time
@@ -9,7 +8,7 @@ from app.stores.list_store import ListStore
 from app.stores.stream_store import StreamStore
 from app.stores.string_store import StringStore
 from app.stores.sorted_set_store import SortedSetStore
-from app.geohash import encode as encode_geohash, decode as decode_geohash
+from app.geohash import encode as encode_geohash, decode as decode_geohash, haversine
 
 parser = argparse.ArgumentParser()
 
@@ -606,7 +605,7 @@ def handle_geoadd(connection, key, longitude, latitude, location):
     except ValueError:
         return connection.sendall(f"-ERR invalid longitude, latitude pair {longitude}, {latitude}\r\n".encode())
 
-    score = encode_geohash(latitude, longitude)
+    score = encode_geohash(longitude, latitude)
     added_count = sorted_set_store.zadd(key, [str(score), location])
 
     connection.sendall(f":{added_count}\r\n".encode())
@@ -619,7 +618,7 @@ def handle_geopos(connection, key, locations):
         if score is None:
             response += "*-1\r\n"
         else:
-            latitude, longitude = decode_geohash(int(score))
+            longitude, latitude = decode_geohash(int(score))
             response += f"*2\r\n${len(str(longitude))}\r\n{longitude}\r\n${len(str(latitude))}\r\n{latitude}\r\n"
 
     return connection.sendall(response.encode())
@@ -632,22 +631,35 @@ def handle_geodist(connection, key, loc1, loc2):
     if score1 is None or score2 is None:
         return connection.sendall(b"$-1\r\n")
 
-    lat1, lon1 = decode_geohash(int(score1))
-    lat2, lon2 = decode_geohash(int(score2))
+    lon1, lat1 = decode_geohash(int(score1))
+    lon2, lat2 = decode_geohash(int(score2))
 
-    from math import radians, sin, cos, sqrt, atan2
+    distance = haversine(lon1, lat1, lon2, lat2)
 
-    R = 6372797.560856  # Earth radius in meters
-
-    dlon = radians(lon2 - lon1)
-    dlat = radians(lat2 - lat1)
-
-    a = sin(dlat / 2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2)**2
-    c = 2 * atan2(sqrt(a), sqrt(1 - a))
-    # c = 2 * asin(sqrt(a))
-
-    distance = R * c
     return connection.sendall(f"${len(str(distance))}\r\n{distance}\r\n".encode())
+
+
+def handle_geosearch(connection, args):
+    if len(args) < 7 or args[1].upper() != 'FROMLONLAT' or args[4].upper() != 'BYRADIUS':
+        return connection.sendall(b"-ERR syntax error\r\n")
+    
+    key = args[0]
+    try:
+        longitude = float(args[2])
+        latitude = float(args[3])
+        radius = float(args[5])
+        unit = args[6].upper()
+    except ValueError:
+        return connection.sendall(b"-ERR invalid number formats\r\n")
+
+    try:
+        results = sorted_set_store.geosearch(key, longitude, latitude, radius, unit)
+        response = f"*{len(results)}\r\n"
+        for location in results:
+            response += f"${len(location)}\r\n{location}\r\n"
+        return connection.sendall(response.encode())
+    except ValueError as e:
+        return connection.sendall(f"-ERR {e}\r\n".encode())
 
 
 def execute_command(connection, command):
@@ -726,6 +738,8 @@ def execute_command(connection, command):
         handle_geopos(connection, command[1], command[2:])
     elif cmd == "GEODIST" and len(command) == 4:
         handle_geodist(connection, command[1], command[2], command[3])
+    elif cmd == "GEOSEARCH":
+        handle_geosearch(connection, command[1:])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
