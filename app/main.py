@@ -612,6 +612,17 @@ def handle_geoadd(connection, key, longitude, latitude, location):
     connection.sendall(f":{added_count}\r\n".encode())
 
 
+def handle_geopos(connection, key, locations):
+    response = f"*{len(locations)}\r\n"
+    for loc in locations:
+        if sorted_set_store.zscore(key, loc) is None:
+            response += "*-1\r\n"
+        else:
+            response += f"*2\r\n$1\r\n0\r\n$1\r\n0\r\n"
+
+    return connection.sendall(response.encode())
+
+
 def execute_command(connection, command):
     cmd = command[0].upper() if command else None
 
@@ -684,6 +695,8 @@ def execute_command(connection, command):
         handle_zrem(connection, command[1], command[2])
     elif cmd == "GEOADD" and len(command) == 5:
         handle_geoadd(connection, command[1], command[2], command[3], command[4])
+    elif cmd == "GEOPOS" and len(command) >= 3:
+        handle_geopos(connection, command[1], command[2:])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
