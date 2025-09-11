@@ -86,6 +86,13 @@ class SortedSetStore:
 
             return members[start:end + 1]
         
+    def zcard(self, key):
+        with self.lock:
+            if key not in self.data:
+                return 0
+            zset = self.data[key]
+            return len(zset.members)
+        
     def exists(self, key):
         with self.lock:
             return key in self.data

@@ -583,6 +583,11 @@ def handle_zrange(connection, key, start, end):
     return connection.sendall(response.encode())
 
 
+def handle_zcard(connection, key):
+    cardinality = sorted_set_store.zcard(key)
+    return connection.sendall(f":{cardinality}\r\n".encode())
+
+
 def execute_command(connection, command):
     cmd = command[0].upper() if command else None
 
@@ -647,6 +652,8 @@ def execute_command(connection, command):
         handle_zrank(connection, command[1], command[2])
     elif cmd == "ZRANGE" and len(command) == 4:
         handle_zrange(connection, command[1], command[2], command[3])
+    elif cmd == "ZCARD" and len(command) == 2:
+        handle_zcard(connection, command[1])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
