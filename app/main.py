@@ -1,3 +1,4 @@
+from cmath import asin
 import socket  # noqa: F401
 import threading
 import time
@@ -624,6 +625,31 @@ def handle_geopos(connection, key, locations):
     return connection.sendall(response.encode())
 
 
+def handle_geodist(connection, key, loc1, loc2):
+    score1 = sorted_set_store.zscore(key, loc1)
+    score2 = sorted_set_store.zscore(key, loc2)
+
+    if score1 is None or score2 is None:
+        return connection.sendall(b"$-1\r\n")
+
+    lat1, lon1 = decode_geohash(int(score1))
+    lat2, lon2 = decode_geohash(int(score2))
+
+    from math import radians, sin, cos, sqrt, atan2
+
+    R = 6372797.560856  # Earth radius in meters
+
+    dlon = radians(lon2 - lon1)
+    dlat = radians(lat2 - lat1)
+
+    a = sin(dlat / 2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2)**2
+    c = 2 * atan2(sqrt(a), sqrt(1 - a))
+    # c = 2 * asin(sqrt(a))
+
+    distance = R * c
+    return connection.sendall(f"${len(str(distance))}\r\n{distance}\r\n".encode())
+
+
 def execute_command(connection, command):
     cmd = command[0].upper() if command else None
 
@@ -698,6 +724,8 @@ def execute_command(connection, command):
         handle_geoadd(connection, command[1], command[2], command[3], command[4])
     elif cmd == "GEOPOS" and len(command) >= 3:
         handle_geopos(connection, command[1], command[2:])
+    elif cmd == "GEODIST" and len(command) == 4:
+        handle_geodist(connection, command[1], command[2], command[3])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
