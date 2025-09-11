@@ -596,6 +596,13 @@ def handle_zrem(connection, key, member):
 
 
 def handle_geoadd(connection, key, longitude, latitude, member):
+    try:
+        longitude = float(longitude)
+        latitude = float(latitude)
+        if not (-180 <= longitude <= 180) or not (-85.05112878 <= latitude <= 85.05112878):
+            raise ValueError
+    except ValueError:
+        return connection.sendall(f"-ERR invalid longitude, latitude pair {longitude}, {latitude}\r\n".encode())
     connection.sendall(b":1\r\n")
 
 
