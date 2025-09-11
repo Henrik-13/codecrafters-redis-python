@@ -4,21 +4,26 @@ import time
 import argparse
 
 from app.rdb_parser import RDBParser
+from app.stores.list_store import ListStore
+from app.stores.stream_store import StreamStore
+from app.stores.string_store import StringStore
+from app.stores.sorted_set_store import SortedSetStore
 
 parser = argparse.ArgumentParser()
 
-dictionary = {}
-dictionary_lock = threading.Lock()
-list_dict = {}
-list_dict_lock = threading.Lock()
-streams = {}
-streams_lock = threading.Lock()
+string_store = StringStore()
+list_store = ListStore()
+stream_store = StreamStore()
+sorted_set_store = SortedSetStore()
+
+# streams = {}
+# streams_lock = threading.Lock()
 connections = {}
 connections_lock = threading.Lock()
 subscriptions = {}
 subscriptions_lock = threading.Lock()
-sorted_sets = {}
-sorted_sets_lock = threading.Lock()
+# sorted_sets = {}
+# sorted_sets_lock = threading.Lock()
 
 replica_of = None
 replicas = []
@@ -28,7 +33,7 @@ replica_offsets_lock = threading.Lock()
 master_repl_offset = 0
 master_repl_offset_lock = threading.Lock()
 replica_offset = 0
-write_commands = {"SET", "DEL", "INCR", "DECR", "RPUSH", "LPUSH", "LPOP", "XADD"}
+write_commands = {"SET", "DEL", "INCR", "DECR", "RPUSH", "LPUSH", "LPOP", "XADD", "ZADD"}
 
 master_connection_socket = None
 RDB_HEADER = b'\x52\x45\x44\x49\x53\x30\x30\x31\x31'  # "REDIS0011"
@@ -150,111 +155,65 @@ def handle_echo(connection, message):
 def handle_set(connection, args):
     key = args[0]
     value = args[1]
-    with dictionary_lock:
-        dictionary[key] = value
-        if len(args) > 2 and args[2].upper() == "PX":
-            try:
-                expire_time = int(args[3]) / 1000.0
-                # The timer callback also needs to acquire the lock
-                threading.Timer(expire_time, lambda: (dictionary_lock.acquire(), dictionary.pop(key, None), dictionary_lock.release())).start()
-            except (ValueError, IndexError):
-                return connection.sendall(b"-ERR invalid PX value\r\n")
-    
+    px = None
+    if len(args) > 2 and args[2].upper() == "PX":
+        try:
+            px = int(args[3])
+        except (ValueError, IndexError):
+            return connection.sendall(b"-ERR invalid PX value\r\n")
+    string_store.set(key, value, px=px)
+
     if connection == master_connection_socket:
         return None
-
-    with replicas_lock:
-        is_replica = connection in replicas
-    if not is_replica:
-        return connection.sendall(b"+OK\r\n")
-    return None
+    return connection.sendall(b"+OK\r\n")
 
 
 def handle_get(connection, key):
-    with dictionary_lock:
-        if key in dictionary:
-            value = dictionary[key]
-            response = f"${len(value)}\r\n{value}\r\n"
-            return connection.sendall(response.encode())
-        else:
-            return connection.sendall(b"$-1\r\n")
+    value = string_store.get(key)
+    if value is not None:
+        response = f"${len(value)}\r\n{value}\r\n"
+        return connection.sendall(response.encode())
+    else:
+        return connection.sendall(b"$-1\r\n")
 
 
 def handle_rpush(connection, key, values):
-    with list_dict_lock:
-        if key not in list_dict:
-            list_dict[key] = []
-        for value in values:
-            list_dict[key].append(value)
-        response = f":{len(list_dict[key])}\r\n"
-    return connection.sendall(response.encode())
+    length = list_store.rpush(key, values)
+    return connection.sendall(f":{length}\r\n".encode())
 
 
 def handle_lrange(connection, key, start, end):
-    start = int(start)
-    end = int(end)
-    with list_dict_lock:
-        if key not in list_dict or start >= len(list_dict[key]):
-            return connection.sendall("*0\r\n".encode())
-        lst = list_dict[key]
-
-        if start < 0:
-            start = len(lst) + start
-        if end < 0:
-            end = len(lst) + end
-
-        start = max(0, min(start, len(lst)))
-        end = max(-1, min(end, len(lst) - 1))
-
-        selected_items = lst[start:end + 1]
-    response = f"*{len(selected_items)}\r\n"
-
-    for value in selected_items:
-        response += f"${len(value)}\r\n{value}\r\n"
+    items = list_store.lrange(key, int(start), int(end))
+    response = f"*{len(items)}\r\n"
+    for item in items:
+        response += f"${len(item)}\r\n{item}\r\n"
 
     return connection.sendall(response.encode())
 
 
 def handle_lpush(connection, key, values):
-    with list_dict_lock:
-        if key not in list_dict:
-            list_dict[key] = []
-        for value in values:
-            list_dict[key].insert(0, value)
-        response = f":{len(list_dict[key])}\r\n"
-    return connection.sendall(response.encode())
+    length = list_store.lpush(key, values)
+    return connection.sendall(f":{length}\r\n".encode())
 
 
 def handle_llen(connection, key):
-    with list_dict_lock:
-        length = len(list_dict.get(key, []))
-    response = f":{length}\r\n"
-    return connection.sendall(response.encode())
+    length = list_store.llen(key)
+    return connection.sendall(f":{length}\r\n".encode())
 
 
 def handle_lpop(connection, args):
     key = args[0]
-    count = 1
-    with list_dict_lock:
-        if key not in list_dict or not list_dict[key]:
-            return connection.sendall("$-1\r\n".encode())
-        if len(args) > 1:
-            count = int(args[1])
+    count = int(args[1]) if len(args) > 1 else 1
 
-        deleted_items = []
-        while count > 0 and list_dict[key]:
-            deleted_items.append(list_dict[key].pop(0))
-            count -= 1
-
-    if not deleted_items:
-        response = "$-1\r\n"
-    elif len(deleted_items) == 1:
-        response = f"${len(deleted_items[0])}\r\n{deleted_items[0]}\r\n"
+    items = list_store.lpop(key, count)
+    if not items:
+        return connection.sendall(b"$-1\r\n")
+    if len(items) == 1:
+        response = f"${len(items[0])}\r\n{items[0]}\r\n"
     else:
-        response = f"*{len(deleted_items)}\r\n"
-        for item in deleted_items:
+        response = f"*{len(items)}\r\n"
+        for item in items:
             response += f"${len(item)}\r\n{item}\r\n"
-
     return connection.sendall(response.encode())
 
 
@@ -263,145 +222,48 @@ def handle_blpop(connection, key, timeout):
     start_time = time.time() if timeout > 0 else None
 
     while True:
-        with list_dict_lock:
-            if key in list_dict and list_dict[key]:
-                value = list_dict[key].pop(0)
-                response = f"*2\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n"
-                return connection.sendall(response.encode())
-
-        if timeout == 0:
-            threading.Event().wait(0.1)
-        else:
-            if start_time and (time.time() - start_time) >= timeout:
-                return connection.sendall(b"*-1\r\n")
-            threading.Event().wait(0.1)
+        popped = list_store.lpop(key, 1)
+        if popped:
+            value = popped[0]
+            response = f"*2\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n"
+            return connection.sendall(response.encode())
+        if timeout is not None and start_time and (time.time() - start_time) >= timeout:
+            return connection.sendall(b"*-1\r\n")
+        threading.Event().wait(0.1)
 
 
 def handle_type(connection, key):
-    with dictionary_lock:
-        if key in dictionary:
-            return connection.sendall(b"+string\r\n")
-    with list_dict_lock:
-        if key in list_dict:
-            return connection.sendall(b"+list\r\n")
-    with streams_lock:
-        if key in streams:
-            return connection.sendall(b"+stream\r\n")
+    if string_store.get(key) is not None:
+        return connection.sendall(b"+string\r\n")
+    if list_store.exists(key):
+        return connection.sendall(b"+list\r\n")
+    if stream_store.exists(key):
+        return connection.sendall(b"+stream\r\n")
+    if sorted_set_store.exists(key):
+        return connection.sendall(b"+zset\r\n")
     
     return connection.sendall(b"+none\r\n")
-
-
-def parse_stream_id(id):
-    parts = id.split("-")
-    if len(parts) != 2:
-        return None, None
-    try:
-        timestamp = int(parts[0])
-        sequence = parts[1]
-        if sequence != "*":
-            sequence = int(sequence)
-        return timestamp, sequence
-    except ValueError:
-        return None, None
-
-
-def validate_stream_id(stream_key, id):
-    with streams_lock:
-        if stream_key not in streams or not streams[stream_key]:
-            return True
-        last_entry = streams[stream_key][-1]
-    last_id = last_entry["id"]
-    new_ts, new_seq = parse_stream_id(id)
-    last_ts, last_seq = parse_stream_id(last_id)
-    if new_ts is None or last_ts is None:
-        return False
-    if (new_ts > last_ts) or (new_ts == last_ts and new_seq < last_seq):
-        return False
-    return new_ts > last_ts or (new_ts == last_ts and new_seq > last_seq)
-
-
-def generate_stream_id():
-    current_time = int(time.time() * 1000)
-    return f"{current_time}-0"
-
-
-def generate_next_stream_id(key, ts):
-    with streams_lock:
-        if key in streams and streams[key]:
-            last_entry = streams[key][-1]
-            last_id = last_entry["id"]
-            last_ts, last_seq = parse_stream_id(last_id)
-            seq = last_seq + 1 if ts == last_ts else 0
-        else:
-            seq = 1 if ts == 0 else 0
-    return f"{ts}-{seq}"
 
 
 def handle_xadd(connection, key, id, args):
     if len(args) % 2 != 0:
         return connection.sendall(b"-ERR wrong number of arguments for 'XADD' command\r\n")
-    if id == "*":
-        id = generate_stream_id()
-    else:
-        ts, seq = parse_stream_id(id)
-        if ts is not None and seq == "*":
-            id = generate_next_stream_id(key, ts)
-        else:
-            if ts is None or seq is None or ts < 0 or seq < 0 or (ts == 0 and seq == 0):
-                return connection.sendall(b"-ERR The ID specified in XADD must be greater than 0-0\r\n")
-            if not validate_stream_id(key, id):
-                return connection.sendall(
-                    b"-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n")
-    with streams_lock:
-        if key not in streams:
-            streams[key] = []
-        entry = {"id": id, "fields": {}}
-        for i in range(0, len(args), 2):
-            if i + 1 < len(args):
-                entry["fields"][args[i]] = args[i + 1]
-        streams[key].append(entry)
-    response = f"${len(id)}\r\n{id}\r\n"
-    return connection.sendall(response.encode())
 
-
-def compare_stream_ids(id1, id2):
-    ts1, seq1 = parse_stream_id(id1)
-    ts2, seq2 = parse_stream_id(id2)
-    if ts1 < ts2:
-        return -1
-    elif ts1 > ts2:
-        return 1
-    else:
-        if seq1 < seq2:
-            return -1
-        elif seq1 > seq2:
-            return 1
-        else:
-            return 0
+    fields_dict = {args[i]: args[i + 1] for i in range(0, len(args), 2)}
+    try:
+        new_id = stream_store.xadd(key, id, fields_dict)
+        return connection.sendall(f"${len(new_id)}\r\n{new_id}\r\n".encode())
+    except ValueError as e:
+        return connection.sendall(f"-ERR {str(e)}\r\n".encode())
 
 
 def handle_xrange(connection, key, start, end):
-    with streams_lock:
-        if key not in streams or not streams[key]:
-            return connection.sendall(b"*0\r\n")
-
-        if start == "-":
-            start = streams[key][0]["id"]
-
-        if end == "+":
-            end = streams[key][-1]["id"]
-
-        filtered_entries = []
-        for entry in streams[key]:
-            entry_id = entry["id"]
-            if compare_stream_ids(start, entry_id) <= 0 and compare_stream_ids(entry_id, end) <= 0:
-                filtered_entries.append(entry)
-
-    if not filtered_entries:
+    entries = stream_store.xrange(key, start, end)
+    if not entries:
         return connection.sendall(b"*0\r\n")
 
-    response = f"*{len(filtered_entries)}\r\n"
-    for entry in filtered_entries:
+    response = f"*{len(entries)}\r\n"
+    for entry in entries:
         response += f"*2\r\n${len(entry['id'])}\r\n{entry['id']}\r\n"
         fields = entry["fields"]
         response += f"*{len(fields) * 2}\r\n"
@@ -417,42 +279,14 @@ def handle_xread(connection, args, block=None):
     num_streams = len(args) // 2
     start_time = time.time() if block is not None else None
 
-    processed_ids = []
-    for i in range(num_streams):
-        key = args[i]
-        id = args[i + num_streams]
-
-        if id == "$":
-            with streams_lock:
-                if key in streams and streams[key]:
-                    last_entry = streams[key][-1]
-                    id = last_entry["id"]
-                else:
-                    id = "0-0"
-        processed_ids.append(id)
+    streams_to_read = {args[i]: args[i + num_streams] for i in range(num_streams)}
+    for key, stream_id in streams_to_read.items():
+        if stream_id == "$":
+            streams_to_read[key] = stream_store.get_last_id(key)
 
     while True:
-        has_results = False
-        results = []
-
-        for i in range(num_streams):
-            key = args[i]
-            id = processed_ids[i]
-            with streams_lock:
-                if key not in streams or not streams[key]:
-                    continue
-
-                filtered_entries = []
-                for entry in streams[key]:
-                    entry_id = entry["id"]
-                    if compare_stream_ids(entry_id, id) > 0:
-                        filtered_entries.append(entry)
-
-            if filtered_entries:
-                has_results = True
-                results.append((key, filtered_entries))
-
-        if has_results:
+        results = stream_store.xread(streams_to_read)
+        if results:
             response = f"*{len(results)}\r\n"
             for key, entries in results:
                 response += f"*2\r\n${len(key)}\r\n{key}\r\n*{len(entries)}\r\n"
@@ -474,16 +308,12 @@ def handle_xread(connection, args, block=None):
 
 
 def handle_incr(connection, key):
-    with dictionary_lock:
-        if key not in dictionary:
-            dictionary[key] = "1"
-        else:
-            try:
-                dictionary[key] = str(int(dictionary[key]) + 1)
-            except ValueError:
-                return connection.sendall(b"-ERR value is not an integer or out of range\r\n")
-
-        return connection.sendall(f":{dictionary[key]}\r\n".encode())
+    try:
+        value = string_store.incr(key)
+    except ValueError:
+        return connection.sendall(b"-ERR value is not an integer or out of range\r\n")
+    if value is not None:
+        return connection.sendall(f":{value}\r\n".encode())
 
 
 def handle_multi(connection):
@@ -504,7 +334,10 @@ def handle_exec(connection):
     
     connection.sendall(f"*{len(commands)}\r\n".encode())
     for command in commands:
-        execute_command(connection, command)
+        try:
+            execute_command(connection, command)
+        except Exception as e:
+            connection.sendall(f"-ERR {str(e)}\r\n".encode())
     return None
 
 
@@ -637,8 +470,7 @@ def handle_config(connection, args):
 
 def handle_keys(connection, pattern):
     if pattern == "*":
-        with dictionary_lock:
-            keys = list(dictionary.keys())
+        keys = string_store.keys()
         response = f"*{len(keys)}\r\n"
         for key in keys:
             response += f"${len(key)}\r\n{key}\r\n"
@@ -722,26 +554,19 @@ def handle_publish(connection, channel, message):
 
 
 def handle_zadd(connection, key, args):
-    if len(args) % 2 != 0:
-        return connection.sendall(b"-ERR wrong number of arguments for 'ZADD' command\r\n")
-    
-    added_count = 0
-    with sorted_sets_lock:
-        if key not in sorted_sets:
-            sorted_sets[key] = {}
-        zset = sorted_sets[key]
-        
-        for i in range(0, len(args), 2):
-            try:
-                score = float(args[i])
-                member = args[i + 1]
-                if member not in zset:
-                    added_count += 1
-                zset[member] = score
-            except ValueError:
-                return connection.sendall(b"-ERR score is not a valid float\r\n")
-    
-    return connection.sendall(f":{added_count}\r\n".encode())
+    try:
+        added_count = sorted_set_store.zadd(key, args)
+        return connection.sendall(f":{added_count}\r\n".encode())
+    except ValueError as e:
+        return connection.sendall(f"-ERR {str(e)}\r\n".encode())
+
+
+def handle_zrank(connection, key, member):
+    rank = sorted_set_store.zrank(key, member)
+    if rank is not None:
+        return connection.sendall(f":{rank}\r\n".encode())
+    else:
+        return connection.sendall(b"$-1\r\n")
 
 
 def execute_command(connection, command):
@@ -804,6 +629,8 @@ def execute_command(connection, command):
         handle_publish(connection, command[1], command[2])
     elif cmd == "ZADD" and len(command) >= 4:
         handle_zadd(connection, command[1], command[2:])
+    elif cmd == "ZRANK" and len(command) == 3:
+        handle_zrank(connection, command[1], command[2])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
@@ -995,8 +822,9 @@ def main(args):
     if dir and dbfilename:
         rdb_path = f"{dir}/{dbfilename}"
         rdb_parser = RDBParser(rdb_path)
-        dictionary = rdb_parser.parse()
-        print(f"Loaded {len(dictionary)} keys from RDB file")
+        rdb_data = rdb_parser.parse()
+        string_store.load_from_rdb(rdb_data)
+        print(f"Loaded {len(rdb_data)} keys from RDB file")
 
     while True:
         connection, _ = server_socket.accept()
