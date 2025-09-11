@@ -16,14 +16,10 @@ list_store = ListStore()
 stream_store = StreamStore()
 sorted_set_store = SortedSetStore()
 
-# streams = {}
-# streams_lock = threading.Lock()
 connections = {}
 connections_lock = threading.Lock()
 subscriptions = {}
 subscriptions_lock = threading.Lock()
-# sorted_sets = {}
-# sorted_sets_lock = threading.Lock()
 
 replica_of = None
 replicas = []
@@ -36,8 +32,6 @@ replica_offset = 0
 write_commands = {"SET", "DEL", "INCR", "DECR", "RPUSH", "LPUSH", "LPOP", "XADD", "ZADD"}
 
 master_connection_socket = None
-RDB_HEADER = b'\x52\x45\x44\x49\x53\x30\x30\x31\x31'  # "REDIS0011"
-
 dir = None
 dbfilename = None
 
@@ -601,6 +595,10 @@ def handle_zrem(connection, key, member):
     return connection.sendall(f":{removed_count}\r\n".encode())
 
 
+def handle_geoadd(connection, key, longitude, latitude, member):
+    connection.sendall(b":1\r\n")
+
+
 def execute_command(connection, command):
     cmd = command[0].upper() if command else None
 
@@ -671,6 +669,8 @@ def execute_command(connection, command):
         handle_zscore(connection, command[1], command[2])
     elif cmd == "ZREM" and len(command) == 3:
         handle_zrem(connection, command[1], command[2])
+    elif cmd == "GEOADD" and len(command) == 5:
+        handle_geoadd(connection, command[1], command[2], command[3], command[4])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
