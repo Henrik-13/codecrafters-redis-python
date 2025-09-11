@@ -606,7 +606,6 @@ def handle_geoadd(connection, key, longitude, latitude, location):
         return connection.sendall(f"-ERR invalid longitude, latitude pair {longitude}, {latitude}\r\n".encode())
 
     score = encode_geohash(latitude, longitude)
-    print(f"Adding GEO {location} with score {score} to key {key}")
     added_count = sorted_set_store.zadd(key, [str(score), location])
 
     connection.sendall(f":{added_count}\r\n".encode())
@@ -620,7 +619,7 @@ def handle_geopos(connection, key, locations):
             response += "*-1\r\n"
         else:
             latitude, longitude = decode_geohash(int(score))
-            response += f"*2\r\n${len(str(latitude))}\r\n{latitude}\r\n${len(str(longitude))}\r\n{longitude}\r\n"
+            response += f"*2\r\n${len(str(longitude))}\r\n{longitude}\r\n${len(str(latitude))}\r\n{latitude}\r\n"
 
     return connection.sendall(response.encode())
 
