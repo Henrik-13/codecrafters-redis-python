@@ -1,6 +1,6 @@
 import bisect
 import threading
-from app.geohash import haversine, decode as decode_geohash
+from app.utils.geohash import haversine, decode as decode_geohash
 
 class _SortedSet:
     def __init__(self):
