@@ -82,11 +82,6 @@ class Server:
         buffer = initial_buffer
         try:
             while True:
-                # if not buffer:
-                #     data = connection.recv(1024)
-                #     if not data: break
-                #     buffer += data
-
                 commands_with_bytes, remaining_buffer = self.command_parser.parse_commands(buffer)
 
                 if not commands_with_bytes:
@@ -150,72 +145,6 @@ class Server:
                 handler(connection, command[1:])
         else:
             connection.sendall(b"-ERR unknown command\r\n")
-
-    def send_response(self, connection, initial_buffer=b""):
-        buffer = initial_buffer
-        try:
-            while True:
-                # If we have no data, block and wait for more
-                if not buffer:
-                    data = connection.recv(1024)
-                    if not data:
-                        break  # Connection closed
-                    buffer += data
-
-                # Use the reliable parsing functions
-                commands_with_bytes, remaining_buffer = self.command_parser.parse_commands(buffer)
-
-                # If no full commands could be parsed, we need more data
-                if not commands_with_bytes:
-                    data = connection.recv(1024)
-                    if not data:
-                        break # Connection closed
-                    buffer += data
-                    continue # Go back to the top to try parsing again
-
-                # Process all fully parsed commands
-                for command, command_bytes in commands_with_bytes:
-                    print(f"Received command: {command}")
-                    cmd = command[0].upper() if command else None
-
-                    # Handle commands from the master
-                    if connection == self.master_connection_socket:
-                        # For GETACK, respond with the offset *before* this command
-                        if cmd == "REPLCONF" and len(command) > 1 and command[1].upper() == "GETACK":
-                            offset_str = str(self.replica_offset)
-                            response = f"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${len(offset_str)}\r\n{offset_str}\r\n"
-                            connection.sendall(response.encode())
-                        else:
-                            # For other commands from master, just execute them
-                            self.execute_command(connection, command)
-
-                        # Update the offset *after* processing the command
-                        self.replica_offset += command_bytes
-
-                    # Handle commands from regular clients
-                    else:
-                        if cmd == "MULTI":
-                            self.handle_multi(connection)
-                        elif cmd == "EXEC":
-                            self.handle_exec(connection)
-                        elif cmd == "DISCARD":
-                            self.handle_discard(connection)
-                        elif self.queue_command(connection, command):
-                            # Command was queued, do nothing else
-                            pass
-                        else:
-                            self.execute_command(connection, command)
-                            # Propagate write commands if this is a master server
-                            if not self.replica_of and cmd in self.write_commands:
-                                self.propagate_to_replicas(command)
-
-                # Update the buffer with any remaining, unparsed data
-                buffer = remaining_buffer
-
-        except Exception as e:
-            print(f"Error in send_response: {e}")
-        finally:
-            self.cleanup_connection(connection)
 
     def connect_to_master(self, host, port, replica_port):
         try:
