@@ -69,7 +69,6 @@ class CommandParser:
         current_buffer = buffer
         
         while current_buffer:
-            # initial_buffer_len = len(current_buffer)
             command, new_buffer, bytes_processed = self._parse_stream(current_buffer)
 
             if bytes_processed == 0:
