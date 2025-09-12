@@ -3,6 +3,7 @@ import threading
 import time
 import argparse
 
+from app.command_parser import CommandParser
 from app.rdb_parser import RDBParser
 from app.stores.list_store import ListStore
 from app.stores.stream_store import StreamStore
@@ -11,6 +12,7 @@ from app.stores.sorted_set_store import SortedSetStore
 from app.geohash import encode as encode_geohash, decode as decode_geohash, haversine
 
 parser = argparse.ArgumentParser()
+command_parser = CommandParser()
 
 string_store = StringStore()
 list_store = ListStore()
@@ -22,6 +24,7 @@ connections_lock = threading.Lock()
 subscriptions = {}
 subscriptions_lock = threading.Lock()
 
+master_connection_socket = None
 replica_of = None
 replicas = []
 replicas_lock = threading.Lock()
@@ -32,107 +35,13 @@ master_repl_offset_lock = threading.Lock()
 replica_offset = 0
 write_commands = {"SET", "DEL", "INCR", "DECR", "RPUSH", "LPUSH", "LPOP", "XADD", "ZADD"}
 
-master_connection_socket = None
 dir = None
 dbfilename = None
 
 
-def parse_bulk_string(buffer, s_len):
-    if len(buffer) < s_len + 2:  # +2 for \r\n
-        return None, buffer, 0  # Not enough data
-    
-    # Check for RDB header in the bulk string data
-    # if s_len >= 9 and buffer[:9] == RDB_HEADER:
-    #     print("Detected RDB file, skipping...")
-    #     # Skip the entire RDB file (the bulk string content + \r\n)
-    #     remaining_buffer = buffer[s_len + 2:]
-    #     print("RDB file skipped, ready for replication commands")
-    #     return None, remaining_buffer, s_len + 2  # Return bytes consumed but no command
-        
-    try:
-        bulk_str = buffer[:s_len].decode('utf-8')
-        remaining_buffer = buffer[s_len + 2:]  # +2 for \r\n
-        bytes_processed = s_len + 2
-        return bulk_str, remaining_buffer, bytes_processed
-    except UnicodeDecodeError:
-        # If we can't decode it, it might be binary data (RDB file)
-        print("Skipping binary data (likely RDB)")
-        remaining_buffer = buffer[s_len + 2:]
-        return None, remaining_buffer, s_len + 2
-
-
-def parse_array(buffer, num_args):
-    elements = []
-    current_buffer = buffer
-    total_bytes = 0
-    
-    for _ in range(num_args):
-        element, current_buffer, bytes_processed = parse_stream(current_buffer)
-        if element is None and bytes_processed == 0:
-            return None, buffer, 0  # Not enough data
-        total_bytes += bytes_processed
-        # Only add non-None elements
-        if element is not None:
-            elements.append(element)
-
-    # If we have no valid elements (all were None/RDB), return None
-    if not elements:
-        return None, current_buffer, total_bytes
-        
-    return elements, current_buffer, total_bytes
-
-
-def parse_stream(buffer):
-    if not buffer:
-        return None, buffer, 0
-        
-    # Find the first \r\n
-    crlf_pos = buffer.find(b'\r\n')
-    if crlf_pos == -1:
-        return None, buffer, 0  # Not enough data
-        
-    header = buffer[:crlf_pos].decode()
-    remaining_buffer = buffer[crlf_pos + 2:]
-    cmd_type = header[0]
-    header_bytes = len(header) + 2
-    
-    if cmd_type == '*':
-        num_args = int(header[1:])
-        result, remaining_buffer, bytes_processed = parse_array(remaining_buffer, num_args)
-        return result, remaining_buffer, header_bytes + bytes_processed
-    elif cmd_type == '$':
-        s_len = int(header[1:])
-        if s_len >= 0:
-            result, remaining_buffer, bytes_processed = parse_bulk_string(remaining_buffer, s_len)
-            return result, remaining_buffer, header_bytes + bytes_processed
-        else:
-            return None, remaining_buffer, header_bytes  # Null bulk string
-    else:
-        # Handle other types if needed
-        return None, remaining_buffer, header_bytes
-
-
-def parse_commands(buffer):
-    commands = []
-    current_buffer = buffer
-    
-    while current_buffer:
-        initial_buffer_len = len(current_buffer)
-        command, current_buffer, bytes_processed = parse_stream(current_buffer)
-
-        # If we didn't process any bytes, we don't have enough data
-        if bytes_processed == 0:
-            break
-            
-        # Only add valid commands (not None/RDB skipped data)
-        if command is not None and isinstance(command, list) and len(command) > 0:
-            commands.append((command, bytes_processed))
-        # If we processed bytes but got None (RDB file), just continue without adding command
-        
-    return commands, current_buffer, 0
-
-
-def handle_ping(connection):
+def handle_ping(connection, command):
+    if len(command) != 0:
+        return connection.sendall(b"-ERR wrong number of arguments for 'PING' command\r\n")
     if connection == master_connection_socket:
         return None
     with subscriptions_lock:
@@ -141,64 +50,92 @@ def handle_ping(connection):
         return connection.sendall(b"*2\r\n$4\r\npong\r\n$0\r\n\r\n")
     return connection.sendall(b"+PONG\r\n")
 
-
-def handle_echo(connection, message):
+def handle_echo(connection, command):
+    if len(command) != 1:
+        return connection.sendall(b"-ERR wrong number of arguments for 'ECHO' command\r\n")
+    message = command[0]
     response = f"${len(message)}\r\n{message}\r\n"
     return connection.sendall(response.encode())
 
 
-def handle_set(connection, args):
+def handle_set(connection, command):
+    if len(command) < 2:
+        return connection.sendall(b"-ERR wrong number of arguments for 'SET' command\r\n")
+    args = command
     key = args[0]
     value = args[1]
     px = None
     if len(args) > 2 and args[2].upper() == "PX":
-        try:
-            px = int(args[3])
-        except (ValueError, IndexError):
-            return connection.sendall(b"-ERR invalid PX value\r\n")
-    string_store.set(key, value, px=px)
-
-    if connection == master_connection_socket:
-        return None
-    return connection.sendall(b"+OK\r\n")
+        if len(args) < 4:
+            return connection.sendall(b"-ERR syntax error\r\n")
+        px = int(args[3])
+    
+    string_store.set(key, value, px)
+    if connection != master_connection_socket:
+        connection.sendall(b"+OK\r\n")
 
 
-def handle_get(connection, key):
+def handle_get(connection, command):
+    if len(command) != 1:
+        return connection.sendall(b"-ERR wrong number of arguments for 'GET' command\r\n")
+    key = command[0]
     value = string_store.get(key)
-    if value is not None:
-        response = f"${len(value)}\r\n{value}\r\n"
-        return connection.sendall(response.encode())
+    if value is None:
+        connection.sendall(b"$-1\r\n")
     else:
-        return connection.sendall(b"$-1\r\n")
+        connection.sendall(f"${len(value)}\r\n{value}\r\n".encode())
 
 
-def handle_rpush(connection, key, values):
-    length = list_store.rpush(key, values)
-    return connection.sendall(f":{length}\r\n".encode())
+def handle_rpush(connection, command):
+    if len(command) < 2:
+        return connection.sendall(b"-ERR wrong number of arguments for 'RPUSH' command\r\n")
+    key, values = command[0], command[1:]
+    count = list_store.rpush(key, values)
+    connection.sendall(f":{count}\r\n".encode())
 
 
-def handle_lrange(connection, key, start, end):
-    items = list_store.lrange(key, int(start), int(end))
+def handle_lrange(connection, command):
+    if len(command) != 3:
+        return connection.sendall(b"-ERR wrong number of arguments for 'LRANGE' command\r\n")
+    key, start, end = command[0], command[1], command[2]
+    try:
+        start, end = int(start), int(end)
+    except ValueError:
+        return connection.sendall(b"-ERR value is not an integer or out of range\r\n")
+    
+    items = list_store.lrange(key, start, end)
     response = f"*{len(items)}\r\n"
     for item in items:
         response += f"${len(item)}\r\n{item}\r\n"
-
-    return connection.sendall(response.encode())
-
-
-def handle_lpush(connection, key, values):
-    length = list_store.lpush(key, values)
-    return connection.sendall(f":{length}\r\n".encode())
+    connection.sendall(response.encode())
 
 
-def handle_llen(connection, key):
-    length = list_store.llen(key)
-    return connection.sendall(f":{length}\r\n".encode())
+def handle_lpush(connection, command):
+    if len(command) < 2:
+        return connection.sendall(b"-ERR wrong number of arguments for 'LPUSH' command\r\n")
+    key, values = command[0], command[1:]
+    count = list_store.lpush(key, values)
+    connection.sendall(f":{count}\r\n".encode())
 
 
-def handle_lpop(connection, args):
-    key = args[0]
-    count = int(args[1]) if len(args) > 1 else 1
+def handle_llen(connection, command):
+    if len(command) != 1:
+        return connection.sendall(b"-ERR wrong number of arguments for 'LLEN' command\r\n")
+    key = command[0]
+    count = list_store.llen(key)
+    connection.sendall(f":{count}\r\n".encode())
+
+
+def handle_lpop(connection, command):
+    if len(command) < 1:
+        return connection.sendall(b"-ERR wrong number of arguments for 'LPOP' command\r\n")
+    key = command[0]
+    count = 1
+    if len(command) > 1:
+        try:
+            count = int(command[1])
+        except ValueError:
+            return connection.sendall(b"-ERR value is not an integer or out of range\r\n")
 
     items = list_store.lpop(key, count)
     if not items:
@@ -212,7 +149,11 @@ def handle_lpop(connection, args):
     return connection.sendall(response.encode())
 
 
-def handle_blpop(connection, key, timeout):
+
+def handle_blpop(connection, command):
+    if len(command) != 2:
+        return connection.sendall(b"-ERR wrong number of arguments for 'BLPOP' command\r\n")
+    key, timeout = command[0], command[1]
     timeout = float(timeout)
     start_time = time.time() if timeout > 0 else None
 
@@ -222,12 +163,16 @@ def handle_blpop(connection, key, timeout):
             value = popped[0]
             response = f"*2\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n"
             return connection.sendall(response.encode())
+        
         if timeout is not None and start_time and (time.time() - start_time) >= timeout:
             return connection.sendall(b"*-1\r\n")
         threading.Event().wait(0.1)
 
 
-def handle_type(connection, key):
+def handle_type(connection, command):
+    if len(command) != 1:
+        return connection.sendall(b"-ERR wrong number of arguments for 'TYPE' command\r\n")
+    key = command[0]
     if string_store.get(key) is not None:
         return connection.sendall(b"+string\r\n")
     if list_store.exists(key):
@@ -240,7 +185,10 @@ def handle_type(connection, key):
     return connection.sendall(b"+none\r\n")
 
 
-def handle_xadd(connection, key, id, args):
+def handle_xadd(connection, command):
+    if len(command) < 3:
+        return connection.sendall(b"-ERR wrong number of arguments for 'XADD' command\r\n")
+    key, id, args = command[0], command[1], command[2:]
     if len(args) % 2 != 0:
         return connection.sendall(b"-ERR wrong number of arguments for 'XADD' command\r\n")
 
@@ -252,7 +200,10 @@ def handle_xadd(connection, key, id, args):
         return connection.sendall(f"-ERR {str(e)}\r\n".encode())
 
 
-def handle_xrange(connection, key, start, end):
+def handle_xrange(connection, command):
+    if len(command) != 3:
+        return connection.sendall(b"-ERR wrong number of arguments for 'XRANGE' command\r\n")
+    key, start, end = command[0], command[1], command[2]
     entries = stream_store.xrange(key, start, end)
     if not entries:
         return connection.sendall(b"*0\r\n")
@@ -268,13 +219,23 @@ def handle_xrange(connection, key, start, end):
     return connection.sendall(response.encode())
 
 
-def handle_xread(connection, args, block=None):
-    if len(args) < 2 or len(args) % 2 != 0:
+def handle_xread(connection, command):
+    print(command)
+    block=None
+    if command[0].upper() == "BLOCK":
+        try:
+            block = int(command[1]) / 1000.0
+            command = command[2:]
+            # handle_xread(connection, command[3:], block=block)
+        except ValueError:
+            connection.sendall(b"-ERR invalid BLOCK value\r\n")
+    command = command[1:]
+    if len(command) < 2 or len(command) % 2 != 0:
         return connection.sendall(b"-ERR wrong number of arguments for 'XREAD' command\r\n")
-    num_streams = len(args) // 2
+    num_streams = len(command) // 2
     start_time = time.time() if block is not None else None
 
-    streams_to_read = {args[i]: args[i + num_streams] for i in range(num_streams)}
+    streams_to_read = {command[i]: command[i + num_streams] for i in range(num_streams)}
     for key, stream_id in streams_to_read.items():
         if stream_id == "$":
             streams_to_read[key] = stream_store.get_last_id(key)
@@ -302,7 +263,10 @@ def handle_xread(connection, args, block=None):
         threading.Event().wait(0.1)
 
 
-def handle_incr(connection, key):
+def handle_incr(connection, command):
+    if len(command) != 1:
+        return connection.sendall(b"-ERR wrong number of arguments for 'INCR' command\r\n")
+    key = command[0]
     try:
         value = string_store.incr(key)
     except ValueError:
@@ -355,18 +319,21 @@ def handle_discard(connection):
     return connection.sendall(b"+OK\r\n")
 
 
-def handle_info(connection, section=None):
-    if section and section.upper() == "REPLICATION":
+def handle_info(connection, command):
+    section = command[0].upper() if len(command) > 0 else None
+    if section == "REPLICATION":
         role = "slave" if replica_of else "master"
         response = f"role:{role}\r\n"
         response += f"master_replid:8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb\r\n"
-        response += f"master_repl_offset:0\r\n"
+        response += f"master_repl_offset:{master_repl_offset}\r\n"
         return connection.sendall(f"${len(response)}\r\n{response}\r\n".encode())
     else:
         return connection.sendall(b"-ERR unsupported INFO section\r\n")
 
 
-def handle_psync(connection, args):
+def handle_psync(connection, command):
+    if len(command) != 2:
+        return connection.sendall(b"-ERR wrong number of arguments for 'PSYNC' command\r\n")
     connection.sendall(b"+FULLRESYNC 8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb 0\r\n")
     empty_rdb_file = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2"
     rdb_file_encoded = bytes.fromhex(empty_rdb_file)
@@ -374,7 +341,6 @@ def handle_psync(connection, args):
 
     with replicas_lock:
         replicas.append(connection)
-
 
 
 def propagate_to_replicas(command_array):
@@ -394,6 +360,7 @@ def propagate_to_replicas(command_array):
         try:
             replica.sendall(encoded_bytes)
         except Exception:
+            print(f"Failed to propagate to replica, removing.")
             with replicas_lock:
                 if replica in replicas:
                     replicas.remove(replica)
@@ -402,21 +369,24 @@ def propagate_to_replicas(command_array):
                     del replica_offsets[replica]
 
 
-def handle_replconf(connection, cmd):
-    if len(cmd) >= 1 and cmd[0].upper() == "GETACK":
+def handle_replconf(connection, command):
+    if len(command) >= 1 and command[0].upper() == "GETACK":
         offset_str = str(replica_offset)
         connection.sendall(f"*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n${len(offset_str)}\r\n{offset_str}\r\n".encode())
-    elif len(cmd) >= 2 and cmd[0].upper() == "ACK":
+    elif len(command) >= 2 and command[0].upper() == "ACK":
         with replica_offsets_lock:
-            replica_offsets[connection] = int(cmd[1])
+            replica_offsets[connection] = int(command[1])
     else:
         connection.sendall(b"+OK\r\n")
 
 
-def handle_wait(connection, num_replicas, timeout):
+def handle_wait(connection, command):
+    if len(command) != 2:
+        return connection.sendall(b"-ERR wrong number of arguments for 'WAIT' command\r\n")
+    num_replicas, timeout = command[0], command[1]
     try:
         num_replicas = int(num_replicas)
-        timeout = int(timeout) / 1000.0
+        timeout = int(timeout)
     except ValueError:
         return connection.sendall(b"-ERR invalid WAIT arguments\r\n")
     
@@ -441,7 +411,7 @@ def handle_wait(connection, num_replicas, timeout):
             acked_replicas = current_acks
             break
 
-        if (time.time() - start_time) >= timeout:
+        if (time.time() - start_time) * 1000 >= timeout and timeout != 0:
             with replica_offsets_lock:
                 acked_replicas = sum(1 for offset in replica_offsets.values() if offset >= current_master_offset)
             break
@@ -451,19 +421,25 @@ def handle_wait(connection, num_replicas, timeout):
     connection.sendall(f":{acked_replicas}\r\n".encode())
 
 
-def handle_config(connection, args):
-    if args[0].upper() == "GET":
-        if args[1] == "dir":
-            response = f"*2\r\n$3\r\ndir\r\n${len(dir)}\r\n{dir}\r\n"
-            return connection.sendall(response.encode())
-        elif args[1] == "dbfilename":
-            response = f"*2\r\n$11\r\ndbfilename\r\n${len(dbfilename)}\r\n{dbfilename}\r\n"
-            return connection.sendall(response.encode())
-        else:
-            return connection.sendall(b"-ERR unknown CONFIG GET parameter\r\n")
+def handle_config(connection, command):
+    if len(command) < 2 or command[0].upper() != "GET":
+        return connection.sendall(b"-ERR syntax error\r\n")
+    
+    param = command[1]
+    if param == "dir":
+        response = f"*2\r\n$3\r\ndir\r\n${len(dir)}\r\n{dir}\r\n"
+        return connection.sendall(response.encode())
+    elif param == "dbfilename":
+        response = f"*2\r\n$10\r\ndbfilename\r\n${len(dbfilename)}\r\n{dbfilename}\r\n"
+        return connection.sendall(response.encode())
+    else:
+        return connection.sendall(b"-ERR unknown CONFIG GET parameter\r\n")
 
 
-def handle_keys(connection, pattern):
+def handle_keys(connection, command):
+    if len(command) != 1:
+        return connection.sendall(b"-ERR wrong number of arguments for 'KEYS' command\r\n")
+    pattern = command[0]
     if pattern == "*":
         keys = string_store.keys()
         response = f"*{len(keys)}\r\n"
@@ -474,7 +450,12 @@ def handle_keys(connection, pattern):
         return connection.sendall(b"*0\r\n")
 
 
-def handle_subscribe(connection, channel):
+def handle_subscribe(connection, command):
+    print(command)
+    if len(command) != 1:
+        return connection.sendall(b"-ERR wrong number of arguments for 'SUBSCRIBE' command\r\n")
+    channel = command[0]
+    print(f"Subscribing to channel: {channel}")
     with subscriptions_lock:
         if connection not in subscriptions:
             subscriptions[connection] = set()
@@ -484,6 +465,19 @@ def handle_subscribe(connection, channel):
     return connection.sendall(response.encode())
 
 
+def handle_unsubscribe(connection, channel):
+    if not channel:
+        return connection.sendall(b"-ERR wrong number of arguments for 'UNSUBSCRIBE' command\r\n")
+    with subscriptions_lock:
+        if connection in subscriptions and channel in subscriptions[connection]:
+            subscriptions[connection].remove(channel)
+            response = f"*3\r\n$11\r\nunsubscribe\r\n${len(channel)}\r\n{channel}\r\n:{len(subscriptions[connection])}\r\n"
+            connection.sendall(response.encode())
+        if not subscriptions[connection]:
+            del subscriptions[connection]
+            return
+
+
 def enter_subscription_mode(connection):
     while True:
         try:
@@ -491,27 +485,19 @@ def enter_subscription_mode(connection):
             if not data:
                 break  # Connection closed
             # Ignore any commands while in subscription mode
-            commands_with_bytes, _, _ = parse_commands(data)
+            commands_with_bytes, _ = command_parser.parse_commands(data)
 
             # If no full commands could be parsed, we need more data
             if not commands_with_bytes:
                 continue
             for command, _ in commands_with_bytes:
                 cmd = command[0].upper() if command else None
-                if cmd == "SUBSCRIBE" and len(command) == 2:
-                    handle_subscribe(connection, command[1])
+                if cmd == "SUBSCRIBE":
+                    handle_subscribe(connection, command[1:])
                 elif cmd == "UNSUBSCRIBE" and len(command) == 2:
-                    channel = command[1]
-                    with subscriptions_lock:
-                        if connection in subscriptions and channel in subscriptions[connection]:
-                            subscriptions[connection].remove(channel)
-                            response = f"*3\r\n$11\r\nunsubscribe\r\n${len(channel)}\r\n{channel}\r\n:{len(subscriptions[connection])}\r\n"
-                            connection.sendall(response.encode())
-                        if not subscriptions[connection]:
-                            del subscriptions[connection]
-                            return
+                    handle_unsubscribe(connection, command[1])
                 elif cmd == "PING":
-                    handle_ping(connection)
+                    handle_ping(connection, command[1:])
                 elif cmd == "PSUBSCRIBE" or cmd == "PUNSUBSCRIBE":
                     raise NotImplementedError
                 elif cmd == "QUIT":
@@ -534,7 +520,10 @@ def enter_subscription_mode(connection):
     connection.close()
 
 
-def handle_publish(connection, channel, message):
+def handle_publish(connection, command):
+    if len(command) != 2:
+        return connection.sendall(b"-ERR wrong number of arguments for 'PUBLISH' command\r\n")
+    channel, message = command[0], command[1]
     subscriber_count = 0
     with subscriptions_lock:
         for conn, channels in subscriptions.items():
@@ -548,7 +537,10 @@ def handle_publish(connection, channel, message):
     return connection.sendall(f":{subscriber_count}\r\n".encode())
 
 
-def handle_zadd(connection, key, args):
+def handle_zadd(connection, command):
+    if len(command) < 3:
+        return connection.sendall(b"-ERR wrong number of arguments for 'ZADD' command\r\n")
+    key, args = command[0], command[1:]
     try:
         added_count = sorted_set_store.zadd(key, args)
         return connection.sendall(f":{added_count}\r\n".encode())
@@ -556,7 +548,10 @@ def handle_zadd(connection, key, args):
         return connection.sendall(f"-ERR {str(e)}\r\n".encode())
 
 
-def handle_zrank(connection, key, member):
+def handle_zrank(connection, command):
+    if len(command) != 2:
+        return connection.sendall(b"-ERR wrong number of arguments for 'ZRANK' command\r\n")
+    key, member = command[0], command[1]
     rank = sorted_set_store.zrank(key, member)
     if rank is not None:
         return connection.sendall(f":{rank}\r\n".encode())
@@ -564,12 +559,16 @@ def handle_zrank(connection, key, member):
         return connection.sendall(b"$-1\r\n")
     
 
-def handle_zrange(connection, key, start, end):
+def handle_zrange(connection, command):
+    if len(command) != 3:
+        return connection.sendall(b"-ERR wrong number of arguments for 'ZRANGE' command\r\n")
+    key, start, end = command[0], command[1], command[2]
+
     try:
         start = int(start)
         end = int(end)
     except ValueError:
-        return connection.sendall(b"-ERR start or end is not an integer\r\n")
+        return connection.sendall(b"-ERR value is not an integer or out of range\r\n")
 
     members = sorted_set_store.zrange(key, start, end)
     response = f"*{len(members)}\r\n"
@@ -578,12 +577,18 @@ def handle_zrange(connection, key, start, end):
     return connection.sendall(response.encode())
 
 
-def handle_zcard(connection, key):
+def handle_zcard(connection, command):
+    if len(command) != 1:
+        return connection.sendall(b"-ERR wrong number of arguments for 'ZCARD' command\r\n")
+    key = command[0]
     cardinality = sorted_set_store.zcard(key)
     return connection.sendall(f":{cardinality}\r\n".encode())
 
 
-def handle_zscore(connection, key, member):
+def handle_zscore(connection, command):
+    if len(command) != 2:
+        return connection.sendall(b"-ERR wrong number of arguments for 'ZSCORE' command\r\n")
+    key, member = command[0], command[1]
     score = sorted_set_store.zscore(key, member)
     if score is not None:
         return connection.sendall(f"${len(str(score))}\r\n{score}\r\n".encode())
@@ -591,27 +596,41 @@ def handle_zscore(connection, key, member):
         return connection.sendall(b"$-1\r\n")    
 
 
-def handle_zrem(connection, key, member):
+def handle_zrem(connection, command):
+    if len(command) != 2:
+        return connection.sendall(b"-ERR wrong number of arguments for 'ZREM' command\r\n")
+    key, member = command[0], command[1]
     removed_count = sorted_set_store.zrem(key, member)
     return connection.sendall(f":{removed_count}\r\n".encode())
 
 
-def handle_geoadd(connection, key, longitude, latitude, location):
-    try:
-        longitude = float(longitude)
-        latitude = float(latitude)
-        if not (-180 <= longitude <= 180) or not (-85.05112878 <= latitude <= 85.05112878):
-            raise ValueError
-    except ValueError:
-        return connection.sendall(f"-ERR invalid longitude, latitude pair {longitude}, {latitude}\r\n".encode())
+def handle_geoadd(connection, command):
+    if len(command) < 4 or len(command) % 3 != 1:
+        return connection.sendall(b"-ERR wrong number of arguments for 'GEOADD' command\r\n")
+    
+    key = command[0]
+    locations = command[1:]
+    added_count = 0
+    for i in range(0, len(locations), 3):
+        try:
+            longitude = float(locations[i])
+            latitude = float(locations[i+1])
+            location = locations[i+2]
+            if not (-180 <= longitude <= 180) or not (-85.05112878 <= latitude <= 85.05112878):
+                raise ValueError
+        except (ValueError, IndexError):
+            return connection.sendall(f"-ERR invalid longitude, latitude pair for '{locations[i+2]}'\r\n".encode())
 
-    score = encode_geohash(longitude, latitude)
-    added_count = sorted_set_store.zadd(key, [str(score), location])
+        score = encode_geohash(longitude, latitude)
+        added_count += sorted_set_store.zadd(key, [str(score), location])
 
     connection.sendall(f":{added_count}\r\n".encode())
 
 
-def handle_geopos(connection, key, locations):
+def handle_geopos(connection, command):
+    if len(command) < 2:
+        return connection.sendall(b"-ERR wrong number of arguments for 'GEOPOS' command\r\n")
+    key, locations = command[0], command[1:]
     response = f"*{len(locations)}\r\n"
     for loc in locations:
         score = sorted_set_store.zscore(key, loc)
@@ -624,7 +643,10 @@ def handle_geopos(connection, key, locations):
     return connection.sendall(response.encode())
 
 
-def handle_geodist(connection, key, loc1, loc2):
+def handle_geodist(connection, command):
+    if len(command) != 3:
+        return connection.sendall(b"-ERR wrong number of arguments for 'GEODIST' command\r\n")
+    key, loc1, loc2 = command[0], command[1], command[2]
     score1 = sorted_set_store.zscore(key, loc1)
     score2 = sorted_set_store.zscore(key, loc2)
 
@@ -639,16 +661,16 @@ def handle_geodist(connection, key, loc1, loc2):
     return connection.sendall(f"${len(str(distance))}\r\n{distance}\r\n".encode())
 
 
-def handle_geosearch(connection, args):
-    if len(args) < 7 or args[1].upper() != 'FROMLONLAT' or args[4].upper() != 'BYRADIUS':
+def handle_geosearch(connection, command):
+    if len(command) < 7 or command[1].upper() != 'FROMLONLAT' or command[4].upper() != 'BYRADIUS':
         return connection.sendall(b"-ERR syntax error\r\n")
     
-    key = args[0]
+    key = command[0]
     try:
-        longitude = float(args[2])
-        latitude = float(args[3])
-        radius = float(args[5])
-        unit = args[6].upper()
+        longitude = float(command[2])
+        latitude = float(command[3])
+        radius = float(command[5])
+        unit = command[6].upper()
     except ValueError:
         return connection.sendall(b"-ERR invalid number formats\r\n")
 
@@ -660,86 +682,55 @@ def handle_geosearch(connection, args):
         return connection.sendall(response.encode())
     except ValueError as e:
         return connection.sendall(f"-ERR {e}\r\n".encode())
+    
+
+COMMAND_HANDLERS = {
+    "PING": handle_ping,
+    "ECHO": handle_echo,
+    "SET": handle_set,
+    "GET": handle_get,
+    "RPUSH": handle_rpush,
+    "LRANGE": handle_lrange,
+    "LPUSH": handle_lpush,
+    "LLEN": handle_llen,
+    "LPOP": handle_lpop,
+    "BLPOP": handle_blpop,
+    "TYPE": handle_type,
+    "XADD": handle_xadd,
+    "XRANGE": handle_xrange,
+    "XREAD": handle_xread,
+    "INCR": handle_incr,
+    "INFO": handle_info,
+    "REPLCONF": handle_replconf,
+    "PSYNC": handle_psync,
+    "WAIT": handle_wait,
+    "CONFIG": handle_config,
+    "KEYS": handle_keys,
+    "SUBSCRIBE": handle_subscribe,
+    "PUBLISH": handle_publish,
+    "ZADD": handle_zadd,
+    "ZRANK": handle_zrank,
+    "ZRANGE": handle_zrange,
+    "ZCARD": handle_zcard,
+    "ZSCORE": handle_zscore,
+    "ZREM": handle_zrem,
+    "GEOADD": handle_geoadd,
+    "GEOPOS": handle_geopos,
+    "GEODIST": handle_geodist,
+    "GEOSEARCH": handle_geosearch,
+}
 
 
 def execute_command(connection, command):
     cmd = command[0].upper() if command else None
 
-    if cmd == "PING":
-        handle_ping(connection)
-    elif cmd == "ECHO" and len(command) == 2:
-        handle_echo(connection, command[1])
-    elif cmd == "SET" and len(command) >= 3:
-        handle_set(connection, command[1:])
-    elif cmd == "GET" and len(command) == 2:
-        handle_get(connection, command[1])
-    elif cmd == "RPUSH" and len(command) >= 3:
-        handle_rpush(connection, command[1], command[2:])
-    elif cmd == "LRANGE" and len(command) == 4:
-        handle_lrange(connection, command[1], command[2], command[3])
-    elif cmd == "LPUSH" and len(command) >= 3:
-        handle_lpush(connection, command[1], command[2:])
-    elif cmd == "LLEN" and len(command) == 2:
-        handle_llen(connection, command[1])
-    elif cmd == "LPOP" and len(command) >= 2:
-        handle_lpop(connection, command[1:])
-    elif cmd == "BLPOP" and len(command) == 3:
-        handle_blpop(connection, command[1], command[2])
-    elif cmd == "TYPE" and len(command) == 2:
-        handle_type(connection, command[1])
-    elif cmd == "XADD" and len(command) >= 4:
-        handle_xadd(connection, command[1], command[2], command[3:])
-    elif cmd == "XRANGE" and len(command) == 4:
-        handle_xrange(connection, command[1], command[2], command[3])
-    elif cmd == "XREAD" and len(command) >= 4:
-        if command[1].upper() == "BLOCK":
-            try:
-                block_time = int(command[2]) / 1000.0
-                handle_xread(connection, command[4:], block=block_time)
-            except ValueError:
-                connection.sendall(b"-ERR invalid BLOCK value\r\n")
+    handler = COMMAND_HANDLERS.get(cmd)
+    if handler:
+        if cmd == "SUBSCRIBE":
+            handler(connection, command[1:])
+            enter_subscription_mode(connection)
         else:
-            handle_xread(connection, command[2:], )
-    elif cmd == "INCR" and len(command) == 2:
-        handle_incr(connection, command[1])
-    elif cmd == "INFO" and len(command) >= 1:
-        section = command[1] if len(command) == 2 else None
-        handle_info(connection, section)
-    elif cmd == "REPLCONF" and len(command) >= 2:
-        handle_replconf(connection, command[1:])
-    elif cmd == "PSYNC" and len(command) == 3:
-        handle_psync(connection, command[1:])
-    elif cmd == "WAIT" and len(command) == 3:
-        handle_wait(connection, command[1], command[2])
-    elif cmd == "CONFIG" and len(command) >= 2:
-        handle_config(connection, command[1:])
-    elif cmd == "KEYS" and len(command) == 2:
-        handle_keys(connection, command[1])
-    elif cmd == "SUBSCRIBE" and len(command) == 2:
-        handle_subscribe(connection, command[1])
-        enter_subscription_mode(connection)
-    elif cmd == "PUBLISH" and len(command) == 3:
-        handle_publish(connection, command[1], command[2])
-    elif cmd == "ZADD" and len(command) >= 4:
-        handle_zadd(connection, command[1], command[2:])
-    elif cmd == "ZRANK" and len(command) == 3:
-        handle_zrank(connection, command[1], command[2])
-    elif cmd == "ZRANGE" and len(command) == 4:
-        handle_zrange(connection, command[1], command[2], command[3])
-    elif cmd == "ZCARD" and len(command) == 2:
-        handle_zcard(connection, command[1])
-    elif cmd == "ZSCORE" and len(command) == 3:
-        handle_zscore(connection, command[1], command[2])
-    elif cmd == "ZREM" and len(command) == 3:
-        handle_zrem(connection, command[1], command[2])
-    elif cmd == "GEOADD" and len(command) == 5:
-        handle_geoadd(connection, command[1], command[2], command[3], command[4])
-    elif cmd == "GEOPOS" and len(command) >= 3:
-        handle_geopos(connection, command[1], command[2:])
-    elif cmd == "GEODIST" and len(command) == 4:
-        handle_geodist(connection, command[1], command[2], command[3])
-    elif cmd == "GEOSEARCH":
-        handle_geosearch(connection, command[1:])
+            handler(connection, command[1:])
     else:
         connection.sendall(b"-ERR unknown command\r\n")
 
@@ -757,7 +748,7 @@ def send_response(connection, initial_buffer=b""):
                 buffer += data
 
             # Use the reliable parsing functions
-            commands_with_bytes, remaining_buffer, _ = parse_commands(buffer)
+            commands_with_bytes, remaining_buffer = command_parser.parse_commands(buffer)
 
             # If no full commands could be parsed, we need more data
             if not commands_with_bytes:
