@@ -2,13 +2,13 @@ import socket
 import threading
 import time
 
-from app.command_parser import CommandParser
-from app.rdb_parser import RDBParser
+from app.parsers.command_parser import CommandParser
+from app.parsers.rdb_parser import RDBParser
 from app.stores.list_store import ListStore
 from app.stores.stream_store import StreamStore
 from app.stores.string_store import StringStore
 from app.stores.sorted_set_store import SortedSetStore
-from app.geohash import encode as encode_geohash, decode as decode_geohash, haversine
+from app.utils.geohash import encode as encode_geohash, decode as decode_geohash, haversine
 
 
 class Server:
@@ -82,16 +82,17 @@ class Server:
         buffer = initial_buffer
         try:
             while True:
-                if not buffer:
-                    data = connection.recv(1024)
-                    if not data: break
-                    buffer += data
+                # if not buffer:
+                #     data = connection.recv(1024)
+                #     if not data: break
+                #     buffer += data
 
                 commands_with_bytes, remaining_buffer = self.command_parser.parse_commands(buffer)
 
                 if not commands_with_bytes:
                     data = connection.recv(1024)
-                    if not data: break
+                    if not data:
+                        break
                     buffer += data
                     continue
 
