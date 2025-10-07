@@ -7,16 +7,39 @@ on:
 
 jobs:
     analyze:
+        # runs-on: ubuntu-latest
+        # permissions:
+        #     # required for all workflows
+        #     security-events: write
+        #     # only required for workflows in private repositories
+        #     actions: read
+        #     contents: read
+        # steps:
+        #     - name: Perform Bandit Analysis
+        #       uses: mdegis/bandit-action@v1.1
+        #       with:
+        #           path: .
+        #           excluded_paths: .venv
         runs-on: ubuntu-latest
-        permissions:
-            # required for all workflows
-            security-events: write
-            # only required for workflows in private repositories
-            actions: read
-            contents: read
+
         steps:
-            - name: Perform Bandit Analysis
-              uses: mdegis/bandit-action@v1.1
+            - name: Checkout Code
+              uses: actions/checkout@v4
+
+            - name: Set Up Python
+              uses: actions/setup-python@v3
               with:
-                  path: .
-                  excluded_paths: .venv
+                  python-version: 3.9
+
+            - name: Install Bandit
+              run: pip install bandit
+
+            - name: Run Bandit Scan
+              run: bandit -r . -f json -o bandit-report.json
+
+            # - name: Upload Bandit Scan Artifact
+            #   uses: actions/upload-artifact@v4
+            #   if: always()
+            #   with:
+            #     name: bandit-findings
+            #     path: bandit-report.json
