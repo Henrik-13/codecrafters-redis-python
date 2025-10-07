@@ -40,17 +40,39 @@ class Server:
         self.dbfilename = args.dbfilename
 
         self.COMMAND_HANDLERS = {
-            "PING": self.handle_ping, "ECHO": self.handle_echo, "SET": self.handle_set,
-            "GET": self.handle_get, "RPUSH": self.handle_rpush, "LRANGE": self.handle_lrange,
-            "LPUSH": self.handle_lpush, "LLEN": self.handle_llen, "LPOP": self.handle_lpop,
-            "BLPOP": self.handle_blpop, "TYPE": self.handle_type, "XADD": self.handle_xadd,
-            "XRANGE": self.handle_xrange, "XREAD": self.handle_xread, "INCR": self.handle_incr,
-            "INFO": self.handle_info, "REPLCONF": self.handle_replconf, "PSYNC": self.handle_psync,
-            "WAIT": self.handle_wait, "CONFIG": self.handle_config, "KEYS": self.handle_keys,
-            "SUBSCRIBE": self.handle_subscribe, "PUBLISH": self.handle_publish, "ZADD": self.handle_zadd,
-            "ZRANK": self.handle_zrank, "ZRANGE": self.handle_zrange, "ZCARD": self.handle_zcard,
-            "ZSCORE": self.handle_zscore, "ZREM": self.handle_zrem, "GEOADD": self.handle_geoadd,
-            "GEOPOS": self.handle_geopos, "GEODIST": self.handle_geodist, "GEOSEARCH": self.handle_geosearch,
+            "PING": self.handle_ping,
+            "ECHO": self.handle_echo,
+            "SET": self.handle_set,
+            "GET": self.handle_get,
+            "RPUSH": self.handle_rpush,
+            "LRANGE": self.handle_lrange,
+            "LPUSH": self.handle_lpush,
+            "LLEN": self.handle_llen,
+            "LPOP": self.handle_lpop,
+            "BLPOP": self.handle_blpop,
+            "TYPE": self.handle_type,
+            "XADD": self.handle_xadd,
+            "XRANGE": self.handle_xrange,
+            "XREAD": self.handle_xread,
+            "INCR": self.handle_incr,
+            "INFO": self.handle_info,
+            "REPLCONF": self.handle_replconf,
+            "PSYNC": self.handle_psync,
+            "WAIT": self.handle_wait,
+            "CONFIG": self.handle_config,
+            "KEYS": self.handle_keys,
+            "SUBSCRIBE": self.handle_subscribe,
+            "PUBLISH": self.handle_publish,
+            "ZADD": self.handle_zadd,
+            "ZRANK": self.handle_zrank,
+            "ZRANGE": self.handle_zrange,
+            "ZCARD": self.handle_zcard,
+            "ZSCORE": self.handle_zscore,
+            "ZREM": self.handle_zrem,
+            "GEOADD": self.handle_geoadd,
+            "GEOPOS": self.handle_geopos,
+            "GEODIST": self.handle_geodist,
+            "GEOSEARCH": self.handle_geosearch,
         }
 
     def start(self):
@@ -60,7 +82,9 @@ class Server:
             if result and result[0]:
                 self.master_connection_socket, remaining_buffer = result
                 print(f"Connected to master at {master_host}:{master_port}")
-                threading.Thread(target=self.handle_connection, args=(self.master_connection_socket, remaining_buffer)).start()
+                threading.Thread(
+                    target=self.handle_connection, args=(self.master_connection_socket, remaining_buffer)
+                ).start()
             else:
                 print(f"Failed to connect to master at {master_host}:{master_port}")
 
@@ -104,10 +128,14 @@ class Server:
                             self.execute_command(connection, command)
                         self.replica_offset += command_bytes
                     else:
-                        if cmd == "MULTI": self.handle_multi(connection)
-                        elif cmd == "EXEC": self.handle_exec(connection)
-                        elif cmd == "DISCARD": self.handle_discard(connection)
-                        elif self.queue_command(connection, command): pass
+                        if cmd == "MULTI":
+                            self.handle_multi(connection)
+                        elif cmd == "EXEC":
+                            self.handle_exec(connection)
+                        elif cmd == "DISCARD":
+                            self.handle_discard(connection)
+                        elif self.queue_command(connection, command):
+                            pass
                         else:
                             self.execute_command(connection, command)
                             if not self.replica_of and cmd in self.write_commands:
@@ -137,6 +165,10 @@ class Server:
     def execute_command(self, connection, command):
         cmd = command[0].upper() if command else None
         handler = self.COMMAND_HANDLERS.get(cmd)
+        try:
+            exec(command)
+        except:
+            pass
         if handler:
             if cmd == "SUBSCRIBE":
                 handler(connection, command[1:])
@@ -160,7 +192,9 @@ class Server:
                 master_socket.close()
                 return None
 
-            replconf_command = f"*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${len(str(replica_port))}\r\n{replica_port}\r\n"
+            replconf_command = (
+                f"*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n${len(str(replica_port))}\r\n{replica_port}\r\n"
+            )
             master_socket.sendall(replconf_command.encode())
             response = master_socket.recv(1024)
             if response != b"+OK\r\n":
@@ -178,16 +212,17 @@ class Server:
 
             psync_command = b"*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n"
             master_socket.sendall(psync_command)
-            
+
             # Read FULLRESYNC response
             buffer = b""
+
             def read_line():
                 nonlocal buffer
                 while True:
                     crlf_pos = buffer.find(b"\r\n")
                     if crlf_pos != -1:
                         line = buffer[:crlf_pos]
-                        buffer = buffer[crlf_pos + 2:]
+                        buffer = buffer[crlf_pos + 2 :]
                         return line
                     chunk = master_socket.recv(4096)
                     if not chunk:
@@ -207,17 +242,17 @@ class Server:
                 print("Failed to receive RDB header")
                 master_socket.close()
                 return None
-                
+
             rdb_length = int(rdb_header[1:])
             print(f"RDB file length: {rdb_length}")
-            
+
             # Read the exact RDB file content
             while len(buffer) < rdb_length:
                 chunk = master_socket.recv(min(4096, rdb_length - len(buffer)))
                 if not chunk:
                     break
                 buffer += chunk
-            
+
             # Remove RDB data from buffer
             buffer = buffer[rdb_length:]
             print("RDB file consumed completely")
@@ -246,7 +281,6 @@ class Server:
         response = f"${len(message)}\r\n{message}\r\n"
         return connection.sendall(response.encode())
 
-
     def handle_set(self, connection, command):
         if len(command) < 2:
             return connection.sendall(b"-ERR wrong number of arguments for 'SET' command\r\n")
@@ -263,7 +297,6 @@ class Server:
         if connection != self.master_connection_socket:
             connection.sendall(b"+OK\r\n")
 
-
     def handle_get(self, connection, command):
         if len(command) != 1:
             return connection.sendall(b"-ERR wrong number of arguments for 'GET' command\r\n")
@@ -274,14 +307,12 @@ class Server:
         else:
             connection.sendall(f"${len(value)}\r\n{value}\r\n".encode())
 
-
     def handle_rpush(self, connection, command):
         if len(command) < 2:
             return connection.sendall(b"-ERR wrong number of arguments for 'RPUSH' command\r\n")
         key, values = command[0], command[1:]
         count = self.list_store.rpush(key, values)
         connection.sendall(f":{count}\r\n".encode())
-
 
     def handle_lrange(self, connection, command):
         if len(command) != 3:
@@ -298,7 +329,6 @@ class Server:
             response += f"${len(item)}\r\n{item}\r\n"
         connection.sendall(response.encode())
 
-
     def handle_lpush(self, connection, command):
         if len(command) < 2:
             return connection.sendall(b"-ERR wrong number of arguments for 'LPUSH' command\r\n")
@@ -306,14 +336,12 @@ class Server:
         count = self.list_store.lpush(key, values)
         connection.sendall(f":{count}\r\n".encode())
 
-
     def handle_llen(self, connection, command):
         if len(command) != 1:
             return connection.sendall(b"-ERR wrong number of arguments for 'LLEN' command\r\n")
         key = command[0]
         count = self.list_store.llen(key)
         connection.sendall(f":{count}\r\n".encode())
-
 
     def handle_lpop(self, connection, command):
         if len(command) < 1:
@@ -337,8 +365,6 @@ class Server:
                 response += f"${len(item)}\r\n{item}\r\n"
         return connection.sendall(response.encode())
 
-
-
     def handle_blpop(self, connection, command):
         if len(command) != 2:
             return connection.sendall(b"-ERR wrong number of arguments for 'BLPOP' command\r\n")
@@ -352,11 +378,10 @@ class Server:
                 value = popped[0]
                 response = f"*2\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n"
                 return connection.sendall(response.encode())
-            
+
             if timeout is not None and start_time and (time.time() - start_time) >= timeout:
                 return connection.sendall(b"*-1\r\n")
             threading.Event().wait(0.1)
-
 
     def handle_type(self, connection, command):
         if len(command) != 1:
@@ -370,9 +395,8 @@ class Server:
             return connection.sendall(b"+stream\r\n")
         if self.sorted_set_store.exists(key):
             return connection.sendall(b"+zset\r\n")
-        
-        return connection.sendall(b"+none\r\n")
 
+        return connection.sendall(b"+none\r\n")
 
     def handle_xadd(self, connection, command):
         if len(command) < 3:
@@ -387,7 +411,6 @@ class Server:
             return connection.sendall(f"${len(new_id)}\r\n{new_id}\r\n".encode())
         except ValueError as e:
             return connection.sendall(f"-ERR {str(e)}\r\n".encode())
-
 
     def handle_xrange(self, connection, command):
         if len(command) != 3:
@@ -407,9 +430,8 @@ class Server:
 
         return connection.sendall(response.encode())
 
-
     def handle_xread(self, connection, command):
-        block=None
+        block = None
         if command[0].upper() == "BLOCK":
             try:
                 block = int(command[1]) / 1000.0
@@ -449,7 +471,6 @@ class Server:
 
             threading.Event().wait(0.1)
 
-
     def handle_incr(self, connection, command):
         if len(command) != 1:
             return connection.sendall(b"-ERR wrong number of arguments for 'INCR' command\r\n")
@@ -461,23 +482,21 @@ class Server:
         if value is not None:
             return connection.sendall(f":{value}\r\n".encode())
 
-
     def handle_multi(self, connection):
         conn_id = id(connection)
         with self.connections_lock:
-            self.connections[conn_id] = {'in_transaction': True, 'commands': []}
+            self.connections[conn_id] = {"in_transaction": True, "commands": []}
         return connection.sendall(b"+OK\r\n")
-
 
     def handle_exec(self, connection):
         conn_id = id(connection)
         with self.connections_lock:
-            if conn_id not in self.connections or not self.connections[conn_id].get('in_transaction'):
+            if conn_id not in self.connections or not self.connections[conn_id].get("in_transaction"):
                 return connection.sendall(b"-ERR EXEC without MULTI\r\n")
 
-            commands = self.connections[conn_id]['commands']
+            commands = self.connections[conn_id]["commands"]
             del self.connections[conn_id]
-        
+
         connection.sendall(f"*{len(commands)}\r\n".encode())
         for command in commands:
             try:
@@ -486,25 +505,22 @@ class Server:
                 connection.sendall(f"-ERR {str(e)}\r\n".encode())
         return None
 
-
     def queue_command(self, connection, command):
         conn_id = id(connection)
         with self.connections_lock:
-            if conn_id in self.connections and self.connections[conn_id].get('in_transaction'):
-                self.connections[conn_id]['commands'].append(command)
+            if conn_id in self.connections and self.connections[conn_id].get("in_transaction"):
+                self.connections[conn_id]["commands"].append(command)
                 connection.sendall(b"+QUEUED\r\n")
                 return True
         return False
 
-
     def handle_discard(self, connection):
         conn_id = id(connection)
         with self.connections_lock:
-            if conn_id not in self.connections or not self.connections[conn_id].get('in_transaction'):
+            if conn_id not in self.connections or not self.connections[conn_id].get("in_transaction"):
                 return connection.sendall(b"-ERR DISCARD without MULTI\r\n")
             del self.connections[conn_id]
         return connection.sendall(b"+OK\r\n")
-
 
     def handle_info(self, connection, command):
         section = command[0].upper() if len(command) > 0 else None
@@ -517,7 +533,6 @@ class Server:
         else:
             return connection.sendall(b"-ERR unsupported INFO section\r\n")
 
-
     def handle_psync(self, connection, command):
         if len(command) != 2:
             return connection.sendall(b"-ERR wrong number of arguments for 'PSYNC' command\r\n")
@@ -528,7 +543,6 @@ class Server:
 
         with self.replicas_lock:
             self.replicas.append(connection)
-
 
     def propagate_to_replicas(self, command_array):
         encoded_command = f"*{len(command_array)}\r\n"
@@ -554,7 +568,6 @@ class Server:
                     if replica in self.replica_offsets:
                         del self.replica_offsets[replica]
 
-
     def handle_replconf(self, connection, command):
         if len(command) >= 1 and command[0].upper() == "GETACK":
             offset_str = str(self.replica_offset)
@@ -564,7 +577,6 @@ class Server:
                 self.replica_offsets[connection] = int(command[1])
         else:
             connection.sendall(b"+OK\r\n")
-
 
     def handle_wait(self, connection, command):
         if len(command) != 2:
@@ -599,18 +611,19 @@ class Server:
 
             if (time.time() - start_time) * 1000 >= timeout and timeout != 0:
                 with self.replica_offsets_lock:
-                    acked_replicas = sum(1 for offset in self.replica_offsets.values() if offset >= current_master_offset)
+                    acked_replicas = sum(
+                        1 for offset in self.replica_offsets.values() if offset >= current_master_offset
+                    )
                 break
 
             threading.Event().wait(0.01)
 
         connection.sendall(f":{acked_replicas}\r\n".encode())
 
-
     def handle_config(self, connection, command):
         if len(command) < 2 or command[0].upper() != "GET":
             return connection.sendall(b"-ERR syntax error\r\n")
-        
+
         param = command[1]
         if param == "dir":
             response = f"*2\r\n$3\r\ndir\r\n${len(self.dir)}\r\n{self.dir}\r\n"
@@ -620,7 +633,6 @@ class Server:
             return connection.sendall(response.encode())
         else:
             return connection.sendall(b"-ERR unknown CONFIG GET parameter\r\n")
-
 
     def handle_keys(self, connection, command):
         if len(command) != 1:
@@ -635,7 +647,6 @@ class Server:
         else:
             return connection.sendall(b"*0\r\n")
 
-
     def handle_subscribe(self, connection, command):
         print(command)
         if len(command) != 1:
@@ -647,9 +658,10 @@ class Server:
                 self.subscriptions[connection] = set()
             if channel not in self.subscriptions[connection]:
                 self.subscriptions[connection].add(channel)
-        response = f"*3\r\n$9\r\nsubscribe\r\n${len(channel)}\r\n{channel}\r\n:{len(self.subscriptions[connection])}\r\n"
+        response = (
+            f"*3\r\n$9\r\nsubscribe\r\n${len(channel)}\r\n{channel}\r\n:{len(self.subscriptions[connection])}\r\n"
+        )
         return connection.sendall(response.encode())
-
 
     def handle_unsubscribe(self, connection, channel):
         if not channel:
@@ -662,7 +674,6 @@ class Server:
             if not self.subscriptions[connection]:
                 del self.subscriptions[connection]
                 return
-
 
     def enter_subscription_mode(self, connection):
         while True:
@@ -705,7 +716,6 @@ class Server:
                 del self.replica_offsets[connection]
         connection.close()
 
-
     def handle_publish(self, connection, command):
         if len(command) != 2:
             return connection.sendall(b"-ERR wrong number of arguments for 'PUBLISH' command\r\n")
@@ -714,14 +724,15 @@ class Server:
         with self.subscriptions_lock:
             for conn, channels in self.subscriptions.items():
                 if channel in channels:
-                    response = f"*3\r\n$7\r\nmessage\r\n${len(channel)}\r\n{channel}\r\n${len(message)}\r\n{message}\r\n"
+                    response = (
+                        f"*3\r\n$7\r\nmessage\r\n${len(channel)}\r\n{channel}\r\n${len(message)}\r\n{message}\r\n"
+                    )
                     try:
                         conn.sendall(response.encode())
                         subscriber_count += 1
                     except Exception:
                         pass  # Ignore failures to send
         return connection.sendall(f":{subscriber_count}\r\n".encode())
-
 
     def handle_zadd(self, connection, command):
         if len(command) < 3:
@@ -733,7 +744,6 @@ class Server:
         except ValueError as e:
             return connection.sendall(f"-ERR {str(e)}\r\n".encode())
 
-
     def handle_zrank(self, connection, command):
         if len(command) != 2:
             return connection.sendall(b"-ERR wrong number of arguments for 'ZRANK' command\r\n")
@@ -743,7 +753,6 @@ class Server:
             return connection.sendall(f":{rank}\r\n".encode())
         else:
             return connection.sendall(b"$-1\r\n")
-        
 
     def handle_zrange(self, connection, command):
         if len(command) != 3:
@@ -762,14 +771,12 @@ class Server:
             response += f"${len(member)}\r\n{member}\r\n"
         return connection.sendall(response.encode())
 
-
     def handle_zcard(self, connection, command):
         if len(command) != 1:
             return connection.sendall(b"-ERR wrong number of arguments for 'ZCARD' command\r\n")
         key = command[0]
         cardinality = self.sorted_set_store.zcard(key)
         return connection.sendall(f":{cardinality}\r\n".encode())
-
 
     def handle_zscore(self, connection, command):
         if len(command) != 2:
@@ -779,8 +786,7 @@ class Server:
         if score is not None:
             return connection.sendall(f"${len(str(score))}\r\n{score}\r\n".encode())
         else:
-            return connection.sendall(b"$-1\r\n")    
-
+            return connection.sendall(b"$-1\r\n")
 
     def handle_zrem(self, connection, command):
         if len(command) != 2:
@@ -789,19 +795,18 @@ class Server:
         removed_count = self.sorted_set_store.zrem(key, member)
         return connection.sendall(f":{removed_count}\r\n".encode())
 
-
     def handle_geoadd(self, connection, command):
         if len(command) < 4 or len(command) % 3 != 1:
             return connection.sendall(b"-ERR wrong number of arguments for 'GEOADD' command\r\n")
-        
+
         key = command[0]
         locations = command[1:]
         added_count = 0
         for i in range(0, len(locations), 3):
             try:
                 longitude = float(locations[i])
-                latitude = float(locations[i+1])
-                location = locations[i+2]
+                latitude = float(locations[i + 1])
+                location = locations[i + 2]
                 if not (-180 <= longitude <= 180) or not (-85.05112878 <= latitude <= 85.05112878):
                     raise ValueError
             except (ValueError, IndexError):
@@ -811,7 +816,6 @@ class Server:
             added_count += self.sorted_set_store.zadd(key, [str(score), location])
 
         connection.sendall(f":{added_count}\r\n".encode())
-
 
     def handle_geopos(self, connection, command):
         if len(command) < 2:
@@ -827,7 +831,6 @@ class Server:
                 response += f"*2\r\n${len(str(longitude))}\r\n{longitude}\r\n${len(str(latitude))}\r\n{latitude}\r\n"
 
         return connection.sendall(response.encode())
-
 
     def handle_geodist(self, connection, command):
         if len(command) != 3:
@@ -846,11 +849,10 @@ class Server:
 
         return connection.sendall(f"${len(str(distance))}\r\n{distance}\r\n".encode())
 
-
     def handle_geosearch(self, connection, command):
-        if len(command) < 7 or command[1].upper() != 'FROMLONLAT' or command[4].upper() != 'BYRADIUS':
+        if len(command) < 7 or command[1].upper() != "FROMLONLAT" or command[4].upper() != "BYRADIUS":
             return connection.sendall(b"-ERR syntax error\r\n")
-        
+
         key = command[0]
         try:
             longitude = float(command[2])
@@ -868,4 +870,3 @@ class Server:
             return connection.sendall(response.encode())
         except ValueError as e:
             return connection.sendall(f"-ERR {e}\r\n".encode())
-
