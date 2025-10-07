@@ -1,7 +1,9 @@
 name: Bandit
 
 on:
-    workflow_dispatch:
+    push:
+        branches:
+            - sast
 
 jobs:
     analyze:
