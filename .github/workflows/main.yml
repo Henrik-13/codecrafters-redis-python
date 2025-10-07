@@ -16,4 +16,4 @@ jobs:
             contents: read
         steps:
             - name: Perform Bandit Analysis
-              uses: PyCQA/bandit-action@v1
+              uses: shundor/bandit-action@v1
