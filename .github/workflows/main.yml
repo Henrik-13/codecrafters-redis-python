@@ -16,4 +16,7 @@ jobs:
             contents: read
         steps:
             - name: Perform Bandit Analysis
-              uses: shundor/bandit-action@v1
+              uses: shundor/python-bandit-scan@v1.0
+              with:
+                  path: .
+                  excluded_paths: .venv
