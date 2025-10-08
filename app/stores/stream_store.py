@@ -1,13 +1,14 @@
 import time
 import threading
 
+
 class StreamStore:
     def __init__(self):
         self.data = {}
         self.lock = threading.Lock()
 
-    def _parse_id(self, id):
-        parts = id.split("-")
+    def _parse_id(self, stream_id):
+        parts = stream_id.split("-")
         if len(parts) != 2:
             return None, None
         try:
@@ -16,7 +17,7 @@ class StreamStore:
             return timestamp, sequence
         except ValueError:
             return None, None
-        
+
     def _compare_ids(self, id1, id2):
         ts1, seq1 = self._parse_id(id1)
         ts2, seq2 = self._parse_id(id2)
@@ -43,23 +44,33 @@ class StreamStore:
 
     def _generate_id(self, key, stream_id):
         ts, seq = self._parse_id(stream_id)
-        if ts is None: return None
+        if ts is None:
+            return None
 
         if seq == "*":
             base_ts = ts if ts is not None else int(time.time() * 1000)
             if key not in self.data or not self.data[key]:
                 seq_num = 1 if base_ts == 0 else 0
                 return f"{base_ts}-{seq_num}"
-            
+
             last_id = self.data[key][-1]["id"]
             last_ts, last_seq = self._parse_id(last_id)
             if base_ts > last_ts:
                 return f"{base_ts}-0"
-            else: # base_ts == last_ts
-                return f"{base_ts}-{last_seq + 1}"
-        
+            # base_ts == last_ts
+            return f"{base_ts}-{last_seq + 1}"
+
         return stream_id
-    
+
+    def _is_invalid_id_parts(self, ts, seq):
+        if ts is None or seq is None:
+            return True
+        if ts < 0 or seq < 0:
+            return True
+        if ts == 0 and seq == 0:
+            return True
+        return False
+
     def xadd(self, key, stream_id, fields_dict):
         with self.lock:
             # Validate and generate ID
@@ -71,12 +82,12 @@ class StreamStore:
                 new_id = stream_id
 
             ts, seq = self._parse_id(new_id)
-            if ts is None or seq is None or ts < 0 or seq < 0 or (ts == 0 and seq == 0):
+            if self._is_invalid_id_parts(ts, seq):
                 raise ValueError("The ID specified in XADD must be greater than 0-0")
 
             if not self._validate_id(key, new_id):
                 raise ValueError("The ID specified in XADD is equal or smaller than the target stream top item")
-            
+
             if key not in self.data:
                 self.data[key] = []
 
@@ -84,23 +95,27 @@ class StreamStore:
             self.data[key].append(entry)
 
             return new_id
-        
+
     def xrange(self, key, start, end):
         with self.lock:
-            if key not in self.data: return []
+            if key not in self.data:
+                return []
             stream = self.data[key]
-            if start == "-": start = stream[0]["id"]
-            if end == "+": end = stream[-1]["id"]
+            if start == "-":
+                start = stream[0]["id"]
+            if end == "+":
+                end = stream[-1]["id"]
             return [
-                entry for entry in stream 
+                entry for entry in stream
                 if self._compare_ids(start, entry["id"]) <= 0 and self._compare_ids(entry["id"], end) <= 0
             ]
-    
+
     def xread(self, streams_to_read):
         with self.lock:
             results = []
             for key, start_id in streams_to_read.items():
-                if key not in self.data: continue
+                if key not in self.data:
+                    continue
                 entries = [
                     entry for entry in self.data[key]
                     if self._compare_ids(entry["id"], start_id) > 0
@@ -114,7 +129,7 @@ class StreamStore:
             if key in self.data and self.data[key]:
                 return self.data[key][-1]["id"]
             return "0-0"
-        
+
     def exists(self, key):
         with self.lock:
             return key in self.data

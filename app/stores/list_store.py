@@ -1,5 +1,6 @@
 import threading
 
+
 class ListStore:
     def __init__(self):
         self.data = {}
@@ -29,7 +30,7 @@ class ListStore:
             popped_items = []
             for _ in range(min(count, len(self.data[key]))):
                 popped_items.append(self.data[key].pop(0))
-            
+
             return popped_items
 
     def lrange(self, key, start, end):
@@ -51,7 +52,7 @@ class ListStore:
     def llen(self, key):
         with self.lock:
             return len(self.data.get(key, []))
-        
+
     def exists(self, key):
         with self.lock:
             return key in self.data

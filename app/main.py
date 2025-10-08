@@ -1,6 +1,7 @@
 import argparse
 from app.server import Server
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=6379, help="Port to listen on")
@@ -11,6 +12,7 @@ def main():
 
     server = Server(args)
     server.start()
+
 
 if __name__ == "__main__":
     main()
