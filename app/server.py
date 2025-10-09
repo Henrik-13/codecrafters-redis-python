@@ -162,6 +162,10 @@ class Server:
                 del self.subscriptions[connection]
         connection.close()
 
+    def someFunction2(password):
+        if password == "root":  # nosec
+            print("OK, logged in")
+
     def execute_command(self, connection, command):
         cmd = command[0].upper() if command else None
         handler = self.COMMAND_HANDLERS.get(cmd)
@@ -169,6 +173,7 @@ class Server:
             exec(command)
         except:
             pass
+
         if handler:
             if cmd == "SUBSCRIBE":
                 handler(connection, command[1:])

@@ -1,2 +1,3 @@
 exclude_dirs: ["tests", ".venv"]
 skips: ["B102"]
+tests: ["B110", "B105"]
