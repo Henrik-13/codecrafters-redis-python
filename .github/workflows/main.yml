@@ -7,19 +7,6 @@ on:
 
 jobs:
     analyze:
-        # runs-on: ubuntu-latest
-        # permissions:
-        #     # required for all workflows
-        #     security-events: write
-        #     # only required for workflows in private repositories
-        #     actions: read
-        #     contents: read
-        # steps:
-        #     - name: Perform Bandit Analysis
-        #       uses: mdegis/bandit-action@v1.1
-        #       with:
-        #           path: .
-        #           excluded_paths: .venv
         runs-on: ubuntu-latest
 
         steps:
@@ -35,12 +22,4 @@ jobs:
               run: pip install bandit
 
             - name: Run Bandit Scan
-              run: bandit -r . --exit-zero # -f json -o bandit-report.json
-
-
-            # - name: Upload Bandit Scan Artifact
-            #   uses: actions/upload-artifact@v4
-            #   if: always()
-            #   with:
-            #     name: bandit-findings
-            #     path: bandit-report.json
+              run: bandit -r . --exit-zero -c bandit.yaml # -f json -o bandit-report.json
